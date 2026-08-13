@@ -22,6 +22,7 @@ Jalankan dengan:
 
 import io
 import os
+import re
 from datetime import datetime
 
 import openpyxl
@@ -36,12 +37,14 @@ import streamlit as st
 st.set_page_config(page_title="Dashboard Omset MFlash", layout="wide", page_icon="📊")
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-MAIN_DATA_PATH = os.path.join(DATA_DIR, "main_data.xlsx")
+MAIN_DATA_DIR = os.path.join(DATA_DIR, "main")
+os.makedirs(MAIN_DATA_DIR, exist_ok=True)
 CORPORATE_DATA_PATH = os.path.join(DATA_DIR, "corporate_data.xlsx")
 
 MAIN_SHEET_NAME = "Faktur Penjualan"
-REQUIRED_COLUMNS = ["CABANG", "TGL FAKTUR", "KATEGORI PENJUALAN", "TOTAL HARGA"]
+CORE_COLUMNS = ["TGL FAKTUR", "KATEGORI PENJUALAN", "TOTAL HARGA"]
+REQUIRED_COLUMNS = ["CABANG"] + CORE_COLUMNS
+MAX_MAIN_FILES = 50
 
 BULAN_ID = [
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -60,6 +63,32 @@ def format_rupiah(value: float) -> str:
     if value is None or pd.isna(value):
         value = 0
     return "Rp " + f"{value:,.0f}".replace(",", ".")
+
+
+def sanitize_filename(name: str) -> str:
+    base = os.path.basename(name)
+    base = re.sub(r"[^A-Za-z0-9._\- ]+", "_", base)
+    return base.strip() or "file.xlsx"
+
+
+_FILENAME_NOISE_WORDS = {
+    w.upper() for w in
+    ["FP", "FAKTUR", "PENJUALAN", "DATA", "CABANG", "REPORT", "LAPORAN",
+     "EXPORT", "OMSET", "BULAN", "PERIODE", "MINGGU", "TRIWULAN"] + BULAN_ID
+}
+
+
+def branch_from_filename(filename: str) -> str:
+    """Tebak nama cabang dari nama file, dipakai jika file tidak punya kolom CABANG.
+    Strategi: buang kata-kata umum (FP, Data, nama bulan, dst) & angka, lalu ambil
+    kata pertama yang tersisa sebagai nama cabang."""
+    name = os.path.splitext(os.path.basename(filename))[0]
+    name = re.sub(r"[_\-–]+", " ", name)
+    name = re.sub(r"([A-Za-z])(\d)", r"\1 \2", name)
+    name = re.sub(r"(\d)([A-Za-z])", r"\1 \2", name)
+    tokens = [t for t in re.split(r"\s+", name) if t]
+    cleaned = [t for t in tokens if t.upper() not in _FILENAME_NOISE_WORDS and not t.isdigit()]
+    return cleaned[0].upper() if cleaned else "TIDAK DIKETAHUI"
 
 
 def classify_kategori(kategori: str) -> str:
@@ -97,52 +126,63 @@ def parse_bulan(value) -> int | None:
 # Loader data utama (Faktur Penjualan) - streaming read_only agar cepat & hemat memori
 # --------------------------------------------------------------------------------------
 
+def _find_data_sheet(wb):
+    """Cari sheet yang punya kolom TGL FAKTUR, KATEGORI PENJUALAN, TOTAL HARGA.
+    Diprioritaskan sheet bernama 'Faktur Penjualan', lalu sheet lain yang cocok
+    (berguna untuk file per-cabang yang mungkin punya nama sheet berbeda)."""
+    candidates = sorted(
+        wb.sheetnames,
+        key=lambda n: 0 if n.strip().lower() == MAIN_SHEET_NAME.lower() else 1,
+    )
+    for name in candidates:
+        ws = wb[name]
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if header_row is None:
+            continue
+        col_idx = {}
+        for i, h in enumerate(header_row):
+            if h is None:
+                continue
+            key = str(h).strip().upper()
+            if key in REQUIRED_COLUMNS:
+                col_idx[key] = i
+        if all(c in col_idx for c in CORE_COLUMNS):
+            return ws, col_idx
+    return None, None
+
+
 @st.cache_data(show_spinner=False)
-def load_main_data(file_bytes: bytes) -> pd.DataFrame:
+def load_main_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
 
-    sheet_name = None
-    for name in wb.sheetnames:
-        if name.strip().lower() == MAIN_SHEET_NAME.lower():
-            sheet_name = name
-            break
-    if sheet_name is None:
+    ws, col_idx = _find_data_sheet(wb)
+    if ws is None:
         raise ValueError(
-            f"Sheet '{MAIN_SHEET_NAME}' tidak ditemukan di file. "
+            f"Tidak ada sheet dengan kolom {', '.join(CORE_COLUMNS)}. "
             f"Sheet yang tersedia: {', '.join(wb.sheetnames)}"
         )
 
-    ws = wb[sheet_name]
-    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
-    col_idx = {}
-    for i, h in enumerate(header_row):
-        if h is None:
-            continue
-        key = str(h).strip().upper()
-        if key in REQUIRED_COLUMNS:
-            col_idx[key] = i
-
-    missing = [c for c in REQUIRED_COLUMNS if c not in col_idx]
-    if missing:
-        raise ValueError(
-            f"Kolom berikut tidak ditemukan di sheet '{sheet_name}': {', '.join(missing)}"
-        )
+    has_cabang_col = "CABANG" in col_idx
+    fallback_branch = branch_from_filename(filename_hint) if filename_hint else "TIDAK DIKETAHUI"
 
     max_scan_row = min(ws.max_row, 300_000)
     rows = []
     empty_streak = 0
     for row in ws.iter_rows(min_row=2, max_row=max_scan_row, values_only=True):
-        cabang = row[col_idx["CABANG"]]
-        if cabang is None or str(cabang).strip() == "":
+        cabang = row[col_idx["CABANG"]] if has_cabang_col else None
+        if not cabang or str(cabang).strip() == "":
+            cabang = fallback_branch
+
+        tgl = row[col_idx["TGL FAKTUR"]]
+        kategori = row[col_idx["KATEGORI PENJUALAN"]]
+        total = row[col_idx["TOTAL HARGA"]]
+
+        if tgl is None and kategori is None and total is None:
             empty_streak += 1
             if empty_streak > 3000:
                 break
             continue
         empty_streak = 0
-
-        tgl = row[col_idx["TGL FAKTUR"]]
-        kategori = row[col_idx["KATEGORI PENJUALAN"]]
-        total = row[col_idx["TOTAL HARGA"]]
 
         if not isinstance(tgl, datetime):
             continue
@@ -161,6 +201,7 @@ def load_main_data(file_bytes: bytes) -> pd.DataFrame:
                 "Bulan": tgl.month,
                 "Kategori": str(kategori).strip().upper() if kategori else "LAINNYA",
                 "Omset": total,
+                "SumberFile": filename_hint,
             }
         )
 
@@ -169,6 +210,25 @@ def load_main_data(file_bytes: bytes) -> pd.DataFrame:
         return df
     df["Kelompok"] = df["Kategori"].apply(classify_kategori)
     return df
+
+
+def load_all_main_data(main_dir: str) -> tuple[pd.DataFrame, list[str]]:
+    """Baca semua file .xlsx di folder main_dir (satu file = biasanya satu cabang) dan gabungkan."""
+    files = sorted(f for f in os.listdir(main_dir) if f.lower().endswith(".xlsx"))
+    frames = []
+    errors = []
+    for fname in files:
+        fpath = os.path.join(main_dir, fname)
+        try:
+            with open(fpath, "rb") as f:
+                file_bytes = f.read()
+            df = load_main_data(file_bytes, filename_hint=fname)
+            if not df.empty:
+                frames.append(df)
+        except ValueError as e:
+            errors.append(f"{fname}: {e}")
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return combined, errors
 
 
 @st.cache_data(show_spinner=False)
@@ -239,15 +299,43 @@ def make_corporate_template() -> bytes:
 
 st.sidebar.title("📥 Data")
 
-main_upload = st.sidebar.file_uploader(
-    "Upload file data utama (mengandung sheet 'Faktur Penjualan')",
-    type=["xlsx"],
-    key="main_upload",
+st.sidebar.caption(
+    "Upload file data per cabang (masing-masing file = data 1 cabang, format sama seperti "
+    "sheet 'Faktur Penjualan'). Bisa pilih banyak file sekaligus, sampai 50 file."
 )
-if main_upload is not None:
-    with open(MAIN_DATA_PATH, "wb") as f:
-        f.write(main_upload.getbuffer())
-    st.sidebar.success("File data utama tersimpan.")
+main_uploads = st.sidebar.file_uploader(
+    "Upload file data cabang",
+    type=["xlsx"],
+    accept_multiple_files=True,
+    key="main_uploads",
+)
+if main_uploads:
+    existing = len(os.listdir(MAIN_DATA_DIR))
+    if existing + len(main_uploads) > MAX_MAIN_FILES:
+        st.sidebar.error(
+            f"Maksimal {MAX_MAIN_FILES} file. Saat ini sudah ada {existing} file tersimpan, "
+            f"hapus beberapa dulu di bawah sebelum upload {len(main_uploads)} file baru."
+        )
+    else:
+        for uf in main_uploads:
+            safe_name = sanitize_filename(uf.name)
+            with open(os.path.join(MAIN_DATA_DIR, safe_name), "wb") as f:
+                f.write(uf.getbuffer())
+        st.sidebar.success(f"{len(main_uploads)} file tersimpan.")
+
+stored_main_files = sorted(os.listdir(MAIN_DATA_DIR))
+if stored_main_files:
+    with st.sidebar.expander(f"📁 File cabang tersimpan ({len(stored_main_files)}/{MAX_MAIN_FILES})"):
+        for fname in stored_main_files:
+            fc1, fc2 = st.columns([4, 1])
+            fc1.write(fname)
+            if fc2.button("🗑️", key=f"del_{fname}"):
+                os.remove(os.path.join(MAIN_DATA_DIR, fname))
+                st.rerun()
+        if st.button("Hapus semua file cabang", key="del_all_main"):
+            for fname in stored_main_files:
+                os.remove(os.path.join(MAIN_DATA_DIR, fname))
+            st.rerun()
 
 st.sidebar.markdown("---")
 
@@ -279,22 +367,21 @@ st.sidebar.caption(
 
 st.title("📊 Dashboard Omset MFlash")
 
-if not os.path.exists(MAIN_DATA_PATH):
-    st.info("Silakan upload file data utama (sheet 'Faktur Penjualan') lewat sidebar untuk mulai.")
+if not os.listdir(MAIN_DATA_DIR):
+    st.info("Silakan upload file data cabang (bisa lebih dari satu) lewat sidebar untuk mulai.")
     st.stop()
 
-with open(MAIN_DATA_PATH, "rb") as f:
-    main_bytes = f.read()
+with st.spinner(f"Memproses {len(os.listdir(MAIN_DATA_DIR))} file data cabang..."):
+    df_main, load_errors = load_all_main_data(MAIN_DATA_DIR)
 
-try:
-    with st.spinner("Memproses data utama..."):
-        df_main = load_main_data(main_bytes)
-except ValueError as e:
-    st.error(str(e))
-    st.stop()
+if load_errors:
+    st.warning(
+        "Sebagian file dilewati karena formatnya tidak cocok:\n\n"
+        + "\n".join(f"- {e}" for e in load_errors)
+    )
 
 if df_main.empty:
-    st.warning("Tidak ada data transaksi yang bisa dibaca dari sheet 'Faktur Penjualan'.")
+    st.warning("Tidak ada data transaksi yang bisa dibaca dari file yang diupload.")
     st.stop()
 
 df_corp = pd.DataFrame(columns=["Tahun", "Bulan", "Cabang", "Omset"])
