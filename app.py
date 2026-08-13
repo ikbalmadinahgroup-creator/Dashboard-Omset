@@ -306,6 +306,21 @@ def load_main_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
     return df
 
 
+def _looks_like_ads_export(file_bytes: bytes) -> bool:
+    """Deteksi cepat: apakah file ini sebenarnya export Meta Ads (ke-upload di tempat yang salah)?
+    Kalau iya, dilewati secara diam-diam saat load data cabang (bukan error, cuma salah kolom)."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if not header_row:
+            return False
+        headers = {str(h).strip().upper() for h in header_row if h is not None}
+        return "MESSAGING CONVERSATIONS STARTED" in headers or "CAMPAIGN DELIVERY" in headers
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def load_all_main_data(main_dir: str):
     """Baca semua file .xlsx di folder main_dir (satu file = biasanya satu cabang) dan gabungkan."""
     files = sorted(f for f in os.listdir(main_dir) if f.lower().endswith(".xlsx"))
@@ -320,6 +335,8 @@ def load_all_main_data(main_dir: str):
             if not df.empty:
                 frames.append(df)
         except Exception as e:  # noqa: BLE001 - tampilkan apa adanya, jangan hentikan file lain
+            if _looks_like_ads_export(file_bytes):
+                continue  # kemungkinan besar file export Meta Ads, ke-upload di slot yang salah - lewati diam-diam
             errors.append(f"{fname}: {e}")
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return combined, errors
@@ -1009,23 +1026,32 @@ def build_corp_upload_log(corp_scoreboard_df, corp_scoreboard_tanggal) -> pd.Dat
 def compute_corp_hari_ini(corp_scoreboard_df, corp_scoreboard_tanggal, corp_history: pd.DataFrame):
     """HARI INI untuk Marketing Corporate = S/D Hari Ini hari ini - S/D Hari Ini snapshot
     sebelumnya (dari ledger), karena sheet Scoreboard tidak punya kolom HARI INI untuk
-    section per-sales ini. Baru terisi setelah minimal 2x upload di tanggal berbeda."""
-    if corp_scoreboard_df is None or corp_scoreboard_tanggal is None or corp_history.empty:
+    section per-sales ini. Kalau belum ada snapshot sebelumnya (baru upload pertama kali),
+    dipakai ESTIMASI dari kolom PERIODE BULAN INI (rata-rata omset harian bulan berjalan,
+    sudah ada di sheet Excel) supaya kolom tidak kosong; ditandai di kolom 'HARI INI_ESTIMASI'
+    sehingga tabel bisa menampilkan tanda estimasi (bukan hasil hitung real per hari)."""
+    if corp_scoreboard_df is None:
         return corp_scoreboard_df
 
     def _hari_ini(row):
         nama = row["CABANG"]
         today_sd = row["S/D HARI INI"]
         if today_sd is None or pd.isna(today_sd):
-            return None
-        prior = corp_history[(corp_history["Nama"] == nama) & (corp_history["Tanggal"] < corp_scoreboard_tanggal)]
-        if prior.empty:
-            return None
-        prior_latest = prior.sort_values("Tanggal").iloc[-1]
-        return today_sd - prior_latest["SDHariIni"]
+            return None, False
+        if corp_scoreboard_tanggal is not None and corp_history is not None and not corp_history.empty:
+            prior = corp_history[(corp_history["Nama"] == nama) & (corp_history["Tanggal"] < corp_scoreboard_tanggal)]
+            if not prior.empty:
+                prior_latest = prior.sort_values("Tanggal").iloc[-1]
+                return today_sd - prior_latest["SDHariIni"], False
+        estimasi = row.get("PERIODE BULAN INI")
+        if estimasi is not None and not pd.isna(estimasi):
+            return estimasi, True
+        return None, False
 
     corp_scoreboard_df = corp_scoreboard_df.copy()
-    corp_scoreboard_df["HARI INI"] = corp_scoreboard_df.apply(_hari_ini, axis=1)
+    hasil = corp_scoreboard_df.apply(_hari_ini, axis=1, result_type="expand")
+    corp_scoreboard_df["HARI INI"] = hasil[0]
+    corp_scoreboard_df["HARI INI_ESTIMASI"] = hasil[1]
     return corp_scoreboard_df
 
 
@@ -1510,6 +1536,37 @@ def render_progress_ring(pct, track_color="#e5e7eb"):
     return fig
 
 
+def render_contribution_pie(service_val: float, retail_val: float, corp_val: float):
+    """Donut chart kontribusi Service / Penjualan Retail / Corporate terhadap Omset All,
+    dengan label persentase di tiap slice."""
+    values = [max(service_val, 0.0), max(retail_val, 0.0), max(corp_val, 0.0)]
+    total = sum(values)
+    if total <= 0:
+        return None
+    labels = ["Service", "Penjualan Retail", "Marketing Corporate"]
+    colors = ["#0f766e", "#6d28d9", "#b45309"]
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=labels, values=values, hole=0.55,
+                marker=dict(colors=colors, line=dict(color="#ffffff", width=2)),
+                textinfo="label+percent", textposition="outside",
+                texttemplate="%{label}<br>%{percent}",
+                hovertemplate="%{label}: Rp %{value:,.0f}<extra></extra>",
+                sort=False,
+            )
+        ]
+    )
+    fig.update_layout(
+        annotations=[dict(text=f"<b>Omset All</b><br>{format_rupiah(total)}", x=0.5, y=0.5,
+                           font=dict(size=13, color="#111827"), showarrow=False)],
+        showlegend=False,
+        margin=dict(t=30, b=30, l=30, r=30),
+        height=380,
+    )
+    return fig
+
+
 MONEY_COLS = [
     "OMSET SAMURAI", "OMSET HARIAN (DR TARGET)", "EXPECTED VALUE", "HARI INI", "S/D HARI INI",
     "GAP VS EXPECTED", "TOTAL GAP SAMURAI", "KEJAR TARGET PERHARI",
@@ -1559,6 +1616,9 @@ def render_scoreboard_html(title: str, df: pd.DataFrame, accent: str = "#1f2937"
                 f'font-size:11px;border:1px solid #e5e7eb;white-space:nowrap;">{c}</th>'
             )
 
+    has_estimasi_col = "HARI INI_ESTIMASI" in df.columns
+    any_estimasi = bool(df["HARI INI_ESTIMASI"].fillna(False).any()) if has_estimasi_col else False
+
     body_html = ""
     n = len(df)
     for idx, (_, row) in enumerate(df.iterrows()):
@@ -1571,11 +1631,22 @@ def render_scoreboard_html(title: str, df: pd.DataFrame, accent: str = "#1f2937"
             for c in gcols:
                 v = row[c]
                 txt = format_percent(v) if c == "% PENCAPAIAN" else format_number(v)
+                if c == "HARI INI" and has_estimasi_col and bool(row.get("HARI INI_ESTIMASI")):
+                    txt += " *"
                 color = _cell_color(c, v)
                 body_html += (
                     f'<td style="padding:5px 8px;border:1px solid #e5e7eb;text-align:right;{color}">{txt}</td>'
                 )
         body_html += "</tr>"
+
+    footnote_html = ""
+    if any_estimasi:
+        footnote_html = (
+            f'<tr><td colspan="{len(cols)}" style="padding:6px 8px;font-size:11px;color:#6b7280;'
+            f'background:#fafafa;">* Estimasi dari rata-rata omset harian bulan berjalan (belum ada '
+            f'upload sebelumnya untuk dibandingkan) — akan digantikan hitungan real begitu Anda upload '
+            f'lagi di tanggal lain.</td></tr>'
+        )
 
     return f"""
     <div style="margin-bottom:28px;overflow-x:auto;">
@@ -1587,6 +1658,7 @@ def render_scoreboard_html(title: str, df: pd.DataFrame, accent: str = "#1f2937"
         <tr>{header_group_html}</tr>
         <tr>{header_col_html}</tr>
         {body_html}
+        {footnote_html}
       </table>
     </div>
     """
@@ -1617,14 +1689,15 @@ def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: st
 # Header: logo + judul
 # --------------------------------------------------------------------------------------
 
-logo_col, title_col = st.columns([1, 6])
+logo_col, title_col = st.columns([1, 4])
 with logo_col:
     if LOGO_BASE64 and "PLACEHOLDER" not in LOGO_BASE64:
         st.markdown(
-            f'<img src="data:image/png;base64,{LOGO_BASE64}" style="width:100%;max-width:130px;">',
+            f'<img src="data:image/png;base64,{LOGO_BASE64}" style="width:100%;max-width:280px;">',
             unsafe_allow_html=True,
         )
 with title_col:
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
     st.title("📊 Dashboard Omset MFlash")
     st.caption("Apapun Gadgetnya, MFlash Solusinya")
 
@@ -1893,6 +1966,20 @@ pct_service, ratio_service = _pct_and_target_ratio(boards["SCOREBOARD OMSET SERV
 pct_gadget, ratio_gadget = _pct_and_target_ratio(boards["SCOREBOARD OMSET GADGET & AKSESORIS"][0])
 pct_corp, ratio_corp = _pct_and_target_ratio(board_corp)
 
+
+def _sd_value(board):
+    row = _smm_row(board)
+    if row is None:
+        return None
+    v = row.get("S/D HARI INI")
+    return None if v is None or pd.isna(v) else v
+
+
+sd_service = _sd_value(boards["SCOREBOARD OMSET SERVICE"][0])
+sd_gadget = _sd_value(boards["SCOREBOARD OMSET GADGET & AKSESORIS"][0])
+sd_corp = _sd_value(board_corp)
+sd_retail = max(sd_gadget - (sd_corp or 0.0), 0.0) if sd_gadget is not None else None
+
 tab_ringkasan, tab_scoreboard, tab_ads = st.tabs(["📈 Ringkasan", "🏆 Scoreboard", "📣 Iklan (Meta Ads)"])
 
 # --------------------------------------------------------------------------------------
@@ -1938,6 +2025,40 @@ with tab_ringkasan:
                 f"<b>{ratio_txt}</b> dari keseluruhan target periode ini</div>",
                 unsafe_allow_html=True,
             )
+
+    st.markdown("---")
+    st.subheader("🧩 Kontribusi terhadap Omset All")
+    st.caption(
+        "Komposisi S/D Hari Ini (posisi per tanggal acuan) dipecah jadi 3: **Service**, **Penjualan "
+        "Retail** (= Penjualan Gadget & Aksesoris dikurangi total pencapaian Marketing Corporate), dan "
+        "**Marketing Corporate** (= penjumlahan S/D Hari Ini semua nama sales)."
+    )
+    if sd_service is None or sd_retail is None:
+        st.info("Belum ada data Target/Scoreboard yang cukup untuk hitung kontribusi ini.")
+    else:
+        pcol1, pcol2 = st.columns([2, 1])
+        with pcol1:
+            fig_contrib = render_contribution_pie(sd_service, sd_retail, sd_corp or 0.0)
+            if fig_contrib is not None:
+                st.plotly_chart(fig_contrib, width="stretch")
+            else:
+                st.info("Belum ada omset tercatat untuk kombinasi ini.")
+        with pcol2:
+            total_contrib = sd_service + sd_retail + (sd_corp or 0.0)
+            for label, val, color in [
+                ("Service", sd_service, "#0f766e"),
+                ("Penjualan Retail", sd_retail, "#6d28d9"),
+                ("Marketing Corporate", sd_corp or 0.0, "#b45309"),
+            ]:
+                pct_share = (val / total_contrib) if total_contrib else 0
+                st.markdown(
+                    f"<div style='padding:8px 0;border-bottom:1px solid #eee;'>"
+                    f"<span style='display:inline-block;width:10px;height:10px;border-radius:50%;"
+                    f"background:{color};margin-right:6px;'></span>"
+                    f"<b>{label}</b><br><span style='font-size:13px;color:#374151;'>"
+                    f"{format_rupiah(val)} ({format_percent(pct_share)})</span></div>",
+                    unsafe_allow_html=True,
+                )
 
     st.markdown("---")
     st.subheader("Tren Omset per Bulan")
@@ -2123,9 +2244,10 @@ with tab_scoreboard:
         st.caption(
             f"ℹ️ Tabel di bawah adalah snapshot **per nama sales**, apa adanya dari sheet Scoreboard "
             f"(per tanggal **{tgl_txt}** di file yang diupload) — tidak berubah walau Tanggal Acuan diganti, "
-            "karena tidak ada data transaksi harian corporate yang diupload. Kolom **Hari Ini** dihitung dari "
-            "selisih S/D Hari Ini dibanding upload sebelumnya, jadi baru terisi setelah minimal 2x upload di "
-            "tanggal berbeda."
+            "karena tidak ada data transaksi harian corporate yang diupload. Kolom **Hari Ini** idealnya "
+            "dihitung dari selisih S/D Hari Ini dibanding upload sebelumnya; kalau belum ada upload "
+            "sebelumnya untuk dibandingkan (baru pertama kali upload), dipakai estimasi dari rata-rata "
+            "omset harian bulan berjalan (ditandai *) sampai tersedia data upload berikutnya."
         )
         st.markdown(
             render_scoreboard_html("SCOREBOARD OMSET MARKETING CORPORATE (per Sales)", board_corp, "#b45309", name_label="NAMA SALES"),
@@ -2166,6 +2288,28 @@ with tab_scoreboard:
         st.markdown("".join(render_insight_card(i["title"], i["text"], i["level"]) for i in sales_insights_sorted), unsafe_allow_html=True)
         if len(sales_insights) > 20:
             st.caption(f"Menampilkan 20 insight paling kritis dari total {len(sales_insights)} yang terdeteksi.")
+
+    st.markdown("---")
+    st.subheader("✅ To-Do List Evaluasi Cabang")
+    st.caption(
+        "Daftar tugas otomatis dari insight di atas, urut dari yang paling mendesak. Centang kalau "
+        "sudah ditindaklanjuti — status centang tersimpan selama sesi browser ini terbuka."
+    )
+    action_items = [i for i in sales_insights if i["level"] in ("bad", "warn")] if sales_insights else []
+    _action_order = {"bad": 0, "warn": 1}
+    action_items = sorted(action_items, key=lambda i: _action_order.get(i["level"], 9))[:25]
+    if not action_items:
+        st.success("Tidak ada action item saat ini — semua cabang performanya sehat, tidak perlu tindak lanjut khusus.")
+    else:
+        _action_prefix = {"bad": "🔴 SEGERA", "warn": "🟡 Pantau"}
+        done_count = 0
+        for idx, item in enumerate(action_items):
+            prefix = _action_prefix.get(item["level"], "")
+            label = f"**{prefix} — {item['title']}**  \n{item['text']}"
+            checked = st.checkbox(label, key=f"todo_v7_{idx}_{item['title']}")
+            if checked:
+                done_count += 1
+        st.caption(f"✔️ {done_count} dari {len(action_items)} action item sudah ditandai selesai.")
 
 # --------------------------------------------------------------------------------------
 # TAB 3: Iklan (Meta Ads)

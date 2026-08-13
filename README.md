@@ -34,6 +34,10 @@ streamlit run app.py
 - **Progress Pencapaian**: 3 lingkaran (ring) % pencapaian untuk Omset All, Service, dan
   Gadget & Aksesoris. Di bawah tiap ring ditampilkan juga persentase dari total target periode
   yang sudah tercapai.
+- **🧩 Kontribusi terhadap Omset All**: donut chart komposisi Service / Penjualan Retail /
+  Marketing Corporate, dengan label persentase di tiap slice + rincian angka di sampingnya.
+  Marketing Corporate = penjumlahan S/D Hari Ini semua nama sales; Penjualan Retail = Omset
+  Gadget & Aksesoris dikurangi total pencapaian Marketing Corporate (supaya tidak dobel hitung).
 - Tren omset per bulan & omset per cabang (grafik dengan angka di atas tiap bar + tabel dengan
   gradasi warna), difilter oleh Tahun / Bulan / Cabang di sidebar.
 
@@ -68,11 +72,13 @@ sheet Scoreboard). Konsekuensinya:
 - Warna bar: 🟢 ≥100% · 🟡 85-99,9% · 🔴 <85% · abu-abu = belum ada upload di tanggal itu.
 
 **Scoreboard Marketing Corporate** ditampilkan **per nama sales** (bukan per cabang), diambil apa
-adanya (snapshot) dari sheet Scoreboard file yang diupload. Kolom **Hari Ini** dihitung dari selisih
-S/D Hari Ini dibanding upload sebelumnya (karena section ini di sheet Excel tidak punya kolom Hari
-Ini) — baru terisi setelah minimal 2x upload di tanggal berbeda; upload pertama akan tetap
-menampilkan "-" untuk kolom ini karena belum ada baseline pembanding. Kalau sheet Scoreboard tidak
-ada, otomatis dipakai data manual bulanan (fallback, kolom Hari Ini juga "-" karena datanya bulanan).
+adanya (snapshot) dari sheet Scoreboard file yang diupload — sheet ini memang tidak punya kolom Hari
+Ini untuk section per-sales ini. Kolom **Hari Ini** dihitung dari selisih S/D Hari Ini dibanding
+upload sebelumnya begitu tersedia (minimal 2x upload di tanggal berbeda). Sebelum itu (upload
+pertama, belum ada pembanding), dipakai **estimasi** dari kolom "Periode Bulan Ini" (rata-rata omset
+harian bulan berjalan, sudah ada di sheet Excel) supaya kolomnya tidak kosong — ditandai tanda
+bintang (*) dengan keterangan di bawah tabel. Kalau sheet Scoreboard tidak ada, otomatis dipakai
+data manual bulanan (fallback, kolom Hari Ini juga "-" karena datanya bulanan).
 
 **Tanggal Acuan** ("dianggap sebagai Hari Ini") di sidebar defaultnya adalah tanggal transaksi
 terakhir di data yang diupload, supaya kolom "Hari Ini" tidak pernah kosong. Bisa diganti manual
@@ -91,6 +97,14 @@ plus % Pencapaian terhadap Expected Value:
 - 🚨 Turun >20% dibanding bulan lalu, atau pencapaian <70% → perlu evaluasi segera.
 - ⚠️ Turun 5-20% dibanding bulan lalu, atau pencapaian 70-84,9% → pantau & tambah aktivasi.
 
+### ✅ To-Do List Evaluasi Cabang
+
+Checklist interaktif di bawah insight — setiap item bisa dicentang sebagai penanda "sudah
+ditindaklanjuti". Daftarnya diturunkan otomatis dari insight di atas (item level 🚨/⚠️ saja, item
+✅ yang sudah bagus tidak masuk to-do), diurutkan dari paling mendesak, maksimal 25 item. Status
+centang tersimpan selama sesi browser masih terbuka (reset kalau halaman di-refresh total atau
+data baru diupload).
+
 ## Tab Iklan (Meta Ads)
 
 Upload file export **Campaigns** dari Meta Ads Manager (Ads Manager > Export > Excel) lewat sidebar
@@ -98,6 +112,10 @@ Upload file export **Campaigns** dari Meta Ads Manager (Ads Manager > Export > E
 ditebak otomatis dari nama campaign (contoh: `12 Cinere - MATOT !!!` → CINERE, `10 Warung Bongkok -
 L - MATOT !!!` → WARBONG). Campaign yang namanya tidak diawali kode cabang (mis. campaign umum/brand)
 dikelompokkan sebagai **LAINNYA**.
+
+Kalau file Meta Ads ini ke-upload di tempat yang salah (misalnya di uploader "data cabang" alih-alih
+"Data Iklan Meta Ads"), aplikasi otomatis mendeteksi dan melewatinya secara diam-diam (tidak muncul
+sebagai warning) — cukup upload ulang di uploader yang benar.
 
 Isi tab ini:
 
