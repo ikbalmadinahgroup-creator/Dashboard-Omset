@@ -505,6 +505,59 @@ def render_insight_card(title: str, text: str, level: str) -> str:
     )
 
 
+_SALES_TOTAL_LABELS = ("SMM", "TOTAL", "GRAND TOTAL", "HEAD OF CORPORATE")
+
+
+def generate_sales_insights(board_df: pd.DataFrame, category_label: str, name_label: str = "CABANG"):
+    """Rekomendasi otomatis untuk setiap cabang/nama di sebuah scoreboard: tandai penurunan
+    rata-rata omset harian (bulan ini vs bulan lalu) dan pencapaian yang masih di bawah 85%."""
+    insights = []
+    if board_df is None or board_df.empty:
+        return insights
+
+    rows = board_df[~board_df[name_label].astype(str).str.upper().isin(_SALES_TOTAL_LABELS)]
+    for _, r in rows.iterrows():
+        nama = r.get(name_label)
+        if nama is None or (isinstance(nama, float) and pd.isna(nama)):
+            continue
+
+        gap = r.get("GAP")
+        bulan_lalu = r.get("PERIODE BULAN LALU")
+        bulan_ini = r.get("PERIODE BULAN INI")
+        if gap is not None and not pd.isna(gap) and bulan_lalu is not None and not pd.isna(bulan_lalu) and bulan_lalu > 0:
+            pct_turun = gap / bulan_lalu
+            if pct_turun <= -0.20:
+                insights.append({
+                    "level": "bad", "title": f"{category_label} — {nama}",
+                    "text": f"Rata-rata omset harian turun {format_percent(abs(pct_turun))} dibanding bulan lalu "
+                            f"({format_rupiah(bulan_lalu)} → {format_rupiah(bulan_ini)} per hari). Perlu evaluasi "
+                            f"segera: cek ketersediaan stok/teknisi, promo yang sedang berjalan, dan aktivitas "
+                            f"kompetitor di sekitar cabang ini.",
+                })
+            elif pct_turun <= -0.05:
+                insights.append({
+                    "level": "warn", "title": f"{category_label} — {nama}",
+                    "text": f"Rata-rata omset harian turun {format_percent(abs(pct_turun))} dibanding bulan lalu "
+                            f"({format_rupiah(bulan_lalu)} → {format_rupiah(bulan_ini)} per hari). Pantau terus, "
+                            f"pertimbangkan tambahan promo/aktivasi lokal supaya tidak berlanjut turun.",
+                })
+
+        pct = r.get("% PENCAPAIAN")
+        if pct is not None and not pd.isna(pct) and pct < 0.85:
+            kejar = r.get("KEJAR TARGET PERHARI")
+            saran = (
+                f" Kejar tambahan {format_rupiah(kejar)}/hari sampai akhir periode untuk bisa capai target."
+                if kejar is not None and not pd.isna(kejar) and kejar > 0 else ""
+            )
+            insights.append({
+                "level": "warn" if pct >= 0.7 else "bad",
+                "title": f"{category_label} — {nama}",
+                "text": f"Pencapaian baru {format_percent(pct)} dari expected value (di bawah target 85%).{saran}",
+            })
+
+    return insights
+
+
 def render_kpi_card_text(label: str, value_text: str, color1: str, color2: str, icon: str) -> str:
     return f"""
     <div style="background:linear-gradient(135deg,{color1},{color2});border-radius:14px;
@@ -1176,11 +1229,96 @@ def render_daily_progress_chart(df_kategori, df_target, target_col, branches, ta
 
 
 # --------------------------------------------------------------------------------------
+# Riwayat / History pencapaian harian - tidak hilang walau tanggal sudah lewat, difilter
+# bebas lewat Tanggal/Bulan/Tahun/Cabang (independen dari Tanggal Acuan)
+# --------------------------------------------------------------------------------------
+
+def build_daily_history(df_kategori: pd.DataFrame, df_target: pd.DataFrame, target_col: str,
+                         branches: list, date_start: date, date_end: date) -> pd.DataFrame:
+    """Omset aktual & target per HARI (bukan kumulatif) untuk rentang tanggal bebas,
+    supaya histori pencapaian hari-hari sebelumnya tetap bisa dilihat kapan saja."""
+    if date_end < date_start:
+        date_start, date_end = date_end, date_start
+    dates = pd.date_range(date_start, date_end)
+
+    sub = df_kategori[df_kategori["Cabang"].isin(branches)]
+    daily_actual = sub[(sub["Tanggal"] >= pd.Timestamp(date_start)) & (sub["Tanggal"] <= pd.Timestamp(date_end))]
+    daily_actual = daily_actual.groupby("Tanggal")["Omset"].sum().reindex(dates, fill_value=0.0)
+
+    daily_target = pd.Series(0.0, index=dates)
+    has_target = pd.Series(False, index=dates)
+    if not df_target.empty:
+        cand = df_target[df_target["Cabang"].isin(branches)]
+        for _, trow in cand.iterrows():
+            pm, ps = trow["PeriodeMulai"], trow["PeriodeSelesai"]
+            total_hari = (ps - pm).days + 1
+            if total_hari <= 0 or pd.isna(trow[target_col]):
+                continue
+            daily_rate = trow[target_col] / total_hari
+            mask = [(d.date() >= pm) and (d.date() <= ps) for d in dates]
+            mask = pd.Series(mask, index=dates)
+            daily_target.loc[mask] += daily_rate
+            has_target.loc[mask] = True
+
+    result = pd.DataFrame({
+        "Tanggal": dates,
+        "OmsetAktual": daily_actual.values,
+        "OmsetTarget": daily_target.values,
+        "AdaTarget": has_target.values,
+    })
+    result["PctPencapaian"] = result.apply(
+        lambda r: (r["OmsetAktual"] / r["OmsetTarget"]) if r["AdaTarget"] and r["OmsetTarget"] > 0 else None, axis=1
+    )
+    return result
+
+
+def render_daily_history_chart(hist_df: pd.DataFrame):
+    if hist_df is None or hist_df.empty:
+        return None
+    colors = [pencapaian_color(p) for p in hist_df["PctPencapaian"]]
+    labels = [format_rupiah(v) for v in hist_df["OmsetAktual"]]
+    hover = [
+        f"{d.strftime('%d/%m/%Y')}<br>Omset: {format_rupiah(a)}<br>Target harian: {format_rupiah(t) if ht else '-'}"
+        f"<br>% Pencapaian: {format_percent(p) if p is not None else '-'}"
+        for d, a, t, ht, p in zip(hist_df["Tanggal"], hist_df["OmsetAktual"], hist_df["OmsetTarget"], hist_df["AdaTarget"], hist_df["PctPencapaian"])
+    ]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=hist_df["Tanggal"], y=hist_df["OmsetAktual"], marker_color=colors,
+        text=labels, textposition="outside", textfont=dict(size=9),
+        hovertext=hover, hoverinfo="text", name="Omset Aktual per Hari",
+    ))
+    if hist_df["AdaTarget"].any():
+        fig.add_trace(go.Scatter(
+            x=hist_df["Tanggal"], y=hist_df["OmsetTarget"].where(hist_df["AdaTarget"]),
+            mode="lines", line=dict(color="#6b7280", dash="dash"), name="Target Harian",
+        ))
+    fig.update_layout(
+        legend_title_text="", xaxis_title="", yaxis_title="Omset per hari (Rp)",
+        margin=dict(t=20, b=10, l=10, r=10), height=340, showlegend=True,
+    )
+    return fig
+
+
+# --------------------------------------------------------------------------------------
 # Progress ring (donut) untuk % pencapaian
 # --------------------------------------------------------------------------------------
 
-def render_progress_ring(pct, color="#22c55e", track_color="#e5e7eb"):
+def pencapaian_color(pct) -> str:
+    """Standar warna pencapaian dipakai di ring, badge KPI, dan tabel scoreboard:
+    >=100% hijau, 85%-99,9% kuning, <85% merah."""
+    if pct is None or (isinstance(pct, float) and pd.isna(pct)):
+        return "#9ca3af"
+    if pct >= 1.0:
+        return "#22c55e"
+    if pct >= 0.85:
+        return "#facc15"
+    return "#ef4444"
+
+
+def render_progress_ring(pct, track_color="#e5e7eb"):
     p = 0 if pct is None else max(0.0, min(pct, 1.0))
+    color = pencapaian_color(pct)
     fig = go.Figure(
         data=[
             go.Pie(
@@ -1228,7 +1366,7 @@ def _cell_color(col: str, v) -> str:
     if col == "% PENCAPAIAN":
         if v >= 1:
             return "background-color:#c6efce;color:#006100"
-        if v >= 0.8:
+        if v >= 0.85:
             return "background-color:#ffeb9c;color:#9c6500"
         return "background-color:#ffc7ce;color:#9c0006"
     if col in ("GAP VS EXPECTED", "GAP"):
@@ -1292,8 +1430,8 @@ def render_scoreboard_html(title: str, df: pd.DataFrame, accent: str = "#1f2937"
 def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: str, pct=None) -> str:
     badge = ""
     if pct is not None:
-        badge_bg = "rgba(198,239,206,.9)" if pct >= 1 else ("rgba(255,235,156,.9)" if pct >= 0.8 else "rgba(255,199,206,.9)")
-        badge_fg = "#006100" if pct >= 1 else ("#9c6500" if pct >= 0.8 else "#9c0006")
+        badge_bg = "rgba(198,239,206,.9)" if pct >= 1 else ("rgba(255,235,156,.9)" if pct >= 0.85 else "rgba(255,199,206,.9)")
+        badge_fg = "#006100" if pct >= 1 else ("#9c6500" if pct >= 0.85 else "#9c0006")
         badge = (
             f'<div style="display:inline-block;background:{badge_bg};color:{badge_fg};'
             f'border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;margin-top:6px;">'
@@ -1444,7 +1582,14 @@ st.sidebar.caption(
 # Load data
 # --------------------------------------------------------------------------------------
 
-st.title("📊 Dashboard Omset MFlash")
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+logo_col, title_col = st.columns([1, 6])
+with logo_col:
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=110)
+with title_col:
+    st.title("📊 Dashboard Omset MFlash")
+    st.caption("Apapun Gadgetnya, MFlash Solusinya")
 
 if not os.listdir(MAIN_DATA_DIR):
     st.info("Silakan upload file data cabang (bisa lebih dari satu) lewat sidebar untuk mulai.")
@@ -1595,17 +1740,18 @@ with tab_ringkasan:
     st.subheader("🎯 Progress Pencapaian")
     st.caption(
         f"Posisi per tanggal acuan **{tanggal_acuan.strftime('%d/%m/%Y')}** (ubah di sidebar). "
-        "Ring = % pencapaian terhadap ekspektasi pace saat ini. Teks di bawah = % dari total target periode."
+        "Ring = % pencapaian terhadap ekspektasi pace saat ini (🟢 ≥100% · 🟡 85-99,9% · 🔴 <85%). "
+        "Teks di bawah = % dari total target periode."
     )
     r1, r2, r3 = st.columns(3)
-    for col, title, pct, ratio, color in [
-        (r1, "Omset All", pct_all, ratio_all, "#111827"),
-        (r2, "Omset Service", pct_service, ratio_service, "#0f766e"),
-        (r3, "Omset Gadget & Aksesoris", pct_gadget, ratio_gadget, "#6d28d9"),
+    for col, title, pct, ratio in [
+        (r1, "Omset All", pct_all, ratio_all),
+        (r2, "Omset Service", pct_service, ratio_service),
+        (r3, "Omset Gadget & Aksesoris", pct_gadget, ratio_gadget),
     ]:
         with col:
             st.markdown(f"<div style='text-align:center;font-weight:700;'>{title}</div>", unsafe_allow_html=True)
-            st.plotly_chart(render_progress_ring(pct, color=color), width="stretch", config={"displayModeBar": False})
+            st.plotly_chart(render_progress_ring(pct), width="stretch", config={"displayModeBar": False})
             ratio_txt = format_percent(ratio) if ratio is not None else "-"
             st.markdown(
                 f"<div style='text-align:center;color:#374151;'>Anda telah mencapai "
@@ -1664,11 +1810,16 @@ with tab_ringkasan:
     bcol1, bcol2 = st.columns([2, 1])
     with bcol1:
         branch_long = by_branch.melt(id_vars="Cabang", var_name="Kategori", value_name="Omset")
+        branch_long["Label"] = branch_long["Omset"].apply(lambda v: format_rupiah(v) if v else "")
         fig_branch = px.bar(
             branch_long, x="Cabang", y="Omset", color="Kategori", barmode="group",
-            category_orders={"Cabang": branch_order_local},
+            category_orders={"Cabang": branch_order_local}, text="Label",
         )
-        fig_branch.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)")
+        fig_branch.update_traces(textposition="outside", textfont_size=9, textangle=-90, cliponaxis=False)
+        fig_branch.update_layout(
+            legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)",
+            margin=dict(t=40), height=520,
+        )
         st.plotly_chart(fig_branch, width="stretch")
     with bcol2:
         num_cols = list(by_branch.columns[1:])
@@ -1705,6 +1856,55 @@ with tab_scoreboard:
         f"📅 Tanggal acuan: **{tanggal_acuan.strftime('%d/%m/%Y')}**{sisa_hari_caption}. "
         "Ubah di sidebar kalau mau lihat posisi di tanggal lain."
     )
+
+    st.markdown("### 📅 Riwayat Pencapaian Harian")
+    st.caption(
+        "History ini tidak hilang walau harinya sudah lewat — pilih sendiri rentang tanggal / bulan / "
+        "tahun / cabang untuk lihat pencapaian di hari mana pun. Warna bar: 🟢 ≥100% · 🟡 85-99,9% · 🔴 <85%."
+    )
+    hist_kategori_options = ["Omset All", "Omset Service", "Omset Gadget & Aksesoris"]
+    _hist_map = {
+        "Omset All": boards["SCOREBOARD OMSET ALL"],
+        "Omset Service": boards["SCOREBOARD OMSET SERVICE"],
+        "Omset Gadget & Aksesoris": boards["SCOREBOARD OMSET GADGET & AKSESORIS"],
+    }
+    h1, h2, h3, h4 = st.columns([1.3, 1, 1, 1.7])
+    with h1:
+        hist_kategori = st.selectbox("Kategori", hist_kategori_options, key="hist_kategori")
+    tahun_hist_options = sorted(df_main["Tahun"].unique(), reverse=True) or [date.today().year]
+    with h2:
+        hist_tahun = st.selectbox("Tahun", tahun_hist_options, key="hist_tahun")
+    with h3:
+        hist_bulan = st.selectbox("Bulan", list(range(1, 13)), index=date.today().month - 1, format_func=lambda m: BULAN_ID[m - 1], key="hist_bulan")
+    with h4:
+        hist_cabang = st.multiselect("Cabang", cabang_options, default=branches_sb, key="hist_cabang")
+
+    _last_day = calendar.monthrange(hist_tahun, hist_bulan)[1]
+    _default_start = date(hist_tahun, hist_bulan, 1)
+    _default_end = date(hist_tahun, hist_bulan, _last_day)
+    hist_range = st.date_input(
+        "Rentang tanggal (bisa disesuaikan manual)", value=(_default_start, _default_end),
+        key="hist_range",
+    )
+    if isinstance(hist_range, tuple) and len(hist_range) == 2:
+        hist_start, hist_end = hist_range
+    else:
+        hist_start, hist_end = _default_start, _default_end
+
+    if not hist_cabang:
+        st.info("Pilih minimal satu cabang untuk lihat riwayat pencapaian harian.")
+    else:
+        _, _, hist_subset, hist_target_col = _hist_map[hist_kategori]
+        hist_df = build_daily_history(hist_subset, df_target, hist_target_col, hist_cabang, hist_start, hist_end)
+        fig_hist = render_daily_history_chart(hist_df)
+        if fig_hist is not None:
+            st.plotly_chart(fig_hist, width="stretch")
+            if not hist_df["AdaTarget"].any():
+                st.caption("Belum ada data Target untuk periode ini, jadi bar tetap ditampilkan abu-abu (tidak bisa hitung % pencapaian).")
+        else:
+            st.info("Tidak ada data untuk kombinasi filter ini.")
+
+    st.markdown("---")
 
     if df_target.empty:
         st.info(
@@ -1751,9 +1951,29 @@ with tab_scoreboard:
         )
 
     st.markdown(
-        "**Cara baca warna:** hijau = sudah di atas ekspektasi / target tercapai, "
-        "kuning = mendekati (80-100% dari ekspektasi), merah = di bawah ekspektasi / masih ada gap."
+        "**Cara baca warna:** hijau = sudah di atas ekspektasi / target tercapai (≥100%), "
+        "kuning = mendekati (85-99,9% dari ekspektasi), merah = di bawah ekspektasi / masih ada gap (<85%)."
     )
+
+    st.markdown("---")
+    st.subheader("💡 Insight & Rekomendasi Perbaikan")
+    st.caption(
+        "Dihitung otomatis dari data Service, Gadget & Aksesoris (Penjualan), dan Marketing Corporate: "
+        "membandingkan rata-rata omset harian bulan ini vs bulan lalu, serta % Pencapaian terhadap Expected Value."
+    )
+    sales_insights = (
+        generate_sales_insights(boards["SCOREBOARD OMSET SERVICE"][0], "Omset Service")
+        + generate_sales_insights(boards["SCOREBOARD OMSET GADGET & AKSESORIS"][0], "Penjualan Gadget & Aksesoris")
+        + generate_sales_insights(board_corp, "Marketing Corporate")
+    )
+    if not sales_insights:
+        st.success("Tidak ada penurunan atau gap pencapaian signifikan yang terdeteksi di Service, Gadget & Aksesoris, maupun Marketing Corporate. Pertahankan performa saat ini.")
+    else:
+        _order = {"bad": 0, "warn": 1, "good": 2}
+        sales_insights_sorted = sorted(sales_insights, key=lambda i: _order.get(i["level"], 9))[:20]
+        st.markdown("".join(render_insight_card(i["title"], i["text"], i["level"]) for i in sales_insights_sorted), unsafe_allow_html=True)
+        if len(sales_insights) > 20:
+            st.caption(f"Menampilkan 20 insight paling kritis dari total {len(sales_insights)} yang terdeteksi.")
 
 # --------------------------------------------------------------------------------------
 # TAB 3: Iklan (Meta Ads)
@@ -1822,20 +2042,26 @@ with tab_ads:
 
                 gcol1, gcol2 = st.columns(2)
                 with gcol1:
+                    cost_data = branch_agg.sort_values("CostPerMsg").copy()
+                    cost_data["Label"] = cost_data["CostPerMsg"].apply(lambda v: format_rupiah(v) if pd.notna(v) else "")
                     fig_cost = px.bar(
-                        branch_agg.sort_values("CostPerMsg"), x="Cabang", y="CostPerMsg",
-                        color="CostPerMsg", color_continuous_scale="RdYlGn_r",
+                        cost_data, x="Cabang", y="CostPerMsg",
+                        color="CostPerMsg", color_continuous_scale="RdYlGn_r", text="Label",
                         title="Cost per Messaging Conversation per Cabang (makin rendah makin baik)",
                     )
-                    fig_cost.update_layout(xaxis_title="", yaxis_title="Cost per Messaging (Rp)", coloraxis_showscale=False)
+                    fig_cost.update_traces(textposition="outside", textfont_size=9, cliponaxis=False)
+                    fig_cost.update_layout(xaxis_title="", yaxis_title="Cost per Messaging (Rp)", coloraxis_showscale=False, margin=dict(t=60))
                     st.plotly_chart(fig_cost, width="stretch")
                 with gcol2:
+                    msg_data = branch_agg.sort_values("MsgConv", ascending=False).copy()
+                    msg_data["Label"] = msg_data["MsgConv"].apply(lambda v: format_number(v) if pd.notna(v) else "")
                     fig_msg = px.bar(
-                        branch_agg.sort_values("MsgConv", ascending=False), x="Cabang", y="MsgConv",
-                        color="MsgConv", color_continuous_scale="Greens",
+                        msg_data, x="Cabang", y="MsgConv",
+                        color="MsgConv", color_continuous_scale="Greens", text="Label",
                         title="Jumlah Messaging Conversation per Cabang",
                     )
-                    fig_msg.update_layout(xaxis_title="", yaxis_title="Messaging Conversations", coloraxis_showscale=False)
+                    fig_msg.update_traces(textposition="outside", textfont_size=9, cliponaxis=False)
+                    fig_msg.update_layout(xaxis_title="", yaxis_title="Messaging Conversations", coloraxis_showscale=False, margin=dict(t=60))
                     st.plotly_chart(fig_msg, width="stretch")
 
                 branch_table = branch_agg_display.rename(columns={

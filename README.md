@@ -22,6 +22,8 @@ streamlit run app.py
 3. File yang sudah diupload tersimpan otomatis dan tetap terpakai tiap kali dashboard dibuka lagi.
    Upload ulang dengan nama file sama = update, upload dengan nama beda = ditambahkan.
 
+Logo MFlash tampil otomatis di kiri atas dashboard (`assets/logo.png`).
+
 ## Tab Ringkasan
 
 - 4 kartu KPI (Omset All / Service / Gadget & Aksesoris / Marketing Corporate) dengan badge
@@ -29,8 +31,8 @@ streamlit run app.py
 - **Progress Pencapaian**: 3 lingkaran (ring) % pencapaian untuk Omset All, Service, dan
   Gadget & Aksesoris — mengikuti gaya "Progress Top Leader". Di bawah tiap ring ditampilkan juga
   persentase dari total target periode yang sudah tercapai.
-- Tren omset per bulan & omset per cabang (grafik + tabel dengan gradasi warna), difilter oleh
-  Tahun / Bulan / Cabang di sidebar.
+- Tren omset per bulan & omset per cabang (grafik dengan angka di atas tiap bar + tabel dengan
+  gradasi warna), difilter oleh Tahun / Bulan / Cabang di sidebar.
 
 ## Tab Scoreboard
 
@@ -46,6 +48,11 @@ Tabel gaya scoreboard per cabang untuk Omset All, Service, dan Gadget & Aksesori
 Setiap tabel juga punya expander **Progress Harian** — grafik garis omset kumulatif aktual vs
 target pace lurus (garis putus-putus), dengan garis vertikal menandai tanggal acuan.
 
+**📅 Riwayat Pencapaian Harian**: chart terpisah dengan filter sendiri (Kategori, Tahun, Bulan,
+Cabang, dan rentang tanggal manual) yang menunjukkan omset & % pencapaian per hari — histori hari-
+hari sebelumnya tetap bisa dilihat kapan saja, tidak hilang begitu harinya lewat. Tiap bar diberi
+label angka dan warna sesuai % pencapaian hari itu.
+
 **Scoreboard Marketing Corporate** ditampilkan **per nama sales** (bukan per cabang), diambil apa
 adanya (snapshot) dari sheet Scoreboard file yang diupload — karena data ini bulanan/statis, bukan
 transaksi harian, jadi tidak berubah walau Tanggal Acuan diganti. Kalau sheet Scoreboard tidak ada,
@@ -55,8 +62,15 @@ otomatis dipakai data manual bulanan (fallback).
 terakhir di data yang diupload, supaya kolom "Hari Ini" tidak pernah kosong. Bisa diganti manual
 untuk melihat posisi di tanggal lain.
 
-**Cara baca warna:** hijau = sudah di atas ekspektasi/target tercapai, kuning = mendekati
-(80-100% dari ekspektasi), merah = di bawah ekspektasi/masih ada gap.
+**Cara baca warna** (ring, badge KPI, cell % Pencapaian, dan bar Riwayat Harian semua pakai standar
+yang sama): 🟢 hijau = ≥100% (target tercapai), 🟡 kuning = 85%-99,9% (mendekati), 🔴 merah = <85%
+(masih ada gap).
+
+**💡 Insight & Rekomendasi Perbaikan**: di bagian bawah tab ini, dihitung otomatis untuk Omset
+Service, Penjualan (Gadget & Aksesoris), dan Marketing Corporate — membandingkan rata-rata omset
+harian bulan ini vs bulan lalu per cabang/sales, plus % Pencapaian terhadap Expected Value:
+  - 🚨 Turun >20% dibanding bulan lalu, atau pencapaian <70% → perlu evaluasi segera.
+  - ⚠️ Turun 5-20% dibanding bulan lalu, atau pencapaian 70-84,9% → pantau & tambah aktivasi.
 
 ## Tab Iklan (Meta Ads)
 
@@ -94,8 +108,10 @@ Isi tab ini:
 ```
 app.py               # Aplikasi Streamlit utama
 requirements.txt      # Dependensi Python
+assets/logo.png        # Logo MFlash yang tampil di header dashboard
 data/                 # Dibuat otomatis saat pertama upload (diabaikan git)
   main/                # File-file data cabang (sampai 50 file)
+  ads/                  # File export Meta Ads (sampai 50 file)
   corporate_data.xlsx   # Data Marketing Corporate manual (fallback, opsional)
   target_data.xlsx      # Data Target manual (fallback, opsional)
 ```
