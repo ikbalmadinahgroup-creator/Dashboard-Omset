@@ -2,8 +2,8 @@
 
 Dashboard Streamlit dengan 2 tampilan:
 
-- **Tab Ringkasan** — total Omset All, Omset Service, Omset Gadget & Aksesoris, Omset Marketing Corporate + tren bulanan, bisa difilter Tahun / Bulan / Cabang.
-- **Tab Scoreboard** — tabel per cabang gaya scoreboard (Target, Expected Value, % Pencapaian, Gap, Kejar Target Per Hari, rata-rata omset bulan lalu vs bulan ini) untuk 3 kategori: Omset All, Omset Service, Omset Gadget & Aksesoris.
+- **Tab Ringkasan** — kartu KPI berwarna untuk Omset All, Omset Service, Omset Gadget & Aksesoris, Omset Marketing Corporate + tren bulanan + tabel omset per cabang, bisa difilter Tahun / Bulan / Cabang.
+- **Tab Scoreboard** — tabel per cabang gaya scoreboard berwarna (mengikuti contoh existing: header hijau/oranye/biru per grup kolom, sel hijau/kuning/merah sesuai pencapaian) untuk 4 kategori: **Omset All, Omset Service, Omset Gadget & Aksesoris, Omset Marketing Corporate** — lengkap dengan Target, Expected Value, % Pencapaian, Gap, Kejar Target Per Hari, dan rata-rata omset bulan lalu vs bulan ini.
 
 Semua data diisi lewat tombol upload di sidebar — tidak perlu edit apapun di kode / repo GitHub.
 
@@ -23,7 +23,7 @@ streamlit run app.py
 
 2. **File Data Marketing Corporate** (opsional, terpisah, dipakai di tab Ringkasan): kolom `Tahun`, `Bulan`, `Cabang`, `Omset`. Template ada di sidebar.
 
-3. **File Data Target** (opsional, dipakai di tab Scoreboard): kolom `Cabang`, `Periode Mulai`, `Periode Selesai`, `Target Service`, `Target Gadget & Aksesoris`. Target Omset All dihitung otomatis (Service + Gadget & Aksesoris). Template ada di sidebar.
+3. **File Data Target** (opsional, dipakai di tab Scoreboard): kolom `Cabang`, `Periode Mulai`, `Periode Selesai`, `Target Service`, `Target Gadget & Aksesoris`, `Target Marketing Corporate`. Target Omset All dihitung otomatis (Service + Gadget & Aksesoris). Template ada di sidebar.
    - Kalau target berganti tiap periode (mis. tiap 3 bulan), tambahkan baris baru per periode — sistem otomatis pakai baris yang periodenya mencakup "Tanggal Acuan".
 
 ## Cara baca kolom Scoreboard
@@ -43,6 +43,10 @@ Mengikuti gaya scoreboard existing:
 - **GAP** = Periode Bulan Ini − Periode Bulan Lalu.
 
 Tanpa file Target, kolom Target/Expected Value/%Pencapaian/Gap/Kejar Target akan kosong ("-"), tapi kolom lain (Hari Ini, S/D Hari Ini, Periode Bulan Lalu/Ini, Gap rata-rata) tetap terisi dari data transaksi.
+
+Khusus tabel **Scoreboard Omset Marketing Corporate**: karena datanya bulanan (bukan harian), kolom **HARI INI** selalu "-", dan **S/D HARI INI** dihitung dari jumlah bulan (bukan hari) yang sudah masuk dalam periode target.
+
+**Warna:** hijau = sudah tercapai / di atas ekspektasi, kuning = mendekati (80-100% dari ekspektasi), merah = di bawah ekspektasi / masih ada gap — sama seperti skema warna di file scoreboard yang sudah ada.
 
 File yang diupload otomatis tersimpan di folder `data/` dan dipakai lagi setiap dashboard dibuka, sampai diganti/dihapus lewat sidebar.
 

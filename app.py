@@ -19,6 +19,7 @@ Jalankan dengan:
     streamlit run app.py
 """
 
+import calendar
 import io
 import os
 import re
@@ -361,25 +362,32 @@ def load_target_data(file_bytes: bytes) -> pd.DataFrame:
     df["TargetService"] = pd.to_numeric(df["TARGET SERVICE"], errors="coerce").fillna(0)
     df["TargetGadget"] = pd.to_numeric(df["TARGET GADGET & AKSESORIS"], errors="coerce").fillna(0)
     df["TargetAll"] = df["TargetService"] + df["TargetGadget"]
+    if "TARGET MARKETING CORPORATE" in raw.columns:
+        df["TargetCorporate"] = pd.to_numeric(raw["TARGET MARKETING CORPORATE"], errors="coerce").fillna(0)
+    else:
+        df["TargetCorporate"] = 0.0
     df = df.dropna(subset=["PeriodeMulai", "PeriodeSelesai"])
-    return df[["Cabang", "PeriodeMulai", "PeriodeSelesai", "TargetService", "TargetGadget", "TargetAll"]]
+    return df[["Cabang", "PeriodeMulai", "PeriodeSelesai", "TargetService", "TargetGadget", "TargetAll", "TargetCorporate"]]
 
 
 def make_target_template() -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Data Target"
-    ws.append(["Cabang", "Periode Mulai", "Periode Selesai", "Target Service", "Target Gadget & Aksesoris"])
+    ws.append([
+        "Cabang", "Periode Mulai", "Periode Selesai",
+        "Target Service", "Target Gadget & Aksesoris", "Target Marketing Corporate",
+    ])
     today = date.today()
     for r in [
-        ["KLENDER", today.replace(day=1), today.replace(day=1) + timedelta(days=91), 988358000, 515642000],
-        ["RADJIMAN", today.replace(day=1), today.replace(day=1) + timedelta(days=91), 303000000, 655642350],
+        ["KLENDER", today.replace(day=1), today.replace(day=1) + timedelta(days=91), 988358000, 515642000, 100000000],
+        ["RADJIMAN", today.replace(day=1), today.replace(day=1) + timedelta(days=91), 303000000, 655642350, 30000000],
     ]:
         ws.append(r)
     for cell_row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=2, max_col=3):
         for cell in cell_row:
             cell.number_format = "DD/MM/YYYY"
-    for col, w in zip("ABCDE", [16, 16, 16, 16, 22]):
+    for col, w in zip("ABCDEF", [16, 16, 16, 16, 22, 24]):
         ws.column_dimensions[col].width = w
 
     info = wb.create_sheet("Petunjuk")
@@ -390,6 +398,7 @@ def make_target_template() -> bytes:
     info.append(["  (mis. target 3 bulan berjalan -> Periode Mulai = awal periode, Periode Selesai = akhir periode)"])
     info.append(["- Target Service: target omset Service untuk cabang tsb selama periode itu"])
     info.append(["- Target Gadget & Aksesoris: target omset Gadget & Aksesoris untuk cabang tsb selama periode itu"])
+    info.append(["- Target Marketing Corporate: target omset Marketing Corporate untuk cabang tsb selama periode itu (opsional, boleh 0)"])
     info.append(["- Target Omset All dihitung otomatis = Target Service + Target Gadget & Aksesoris"])
     info.append(["- Kalau target berganti tiap periode, tambahkan baris baru untuk periode berikutnya"])
 
@@ -484,7 +493,11 @@ def build_scoreboard(df_kategori: pd.DataFrame, df_target: pd.DataFrame, target_
         )
 
     result = pd.DataFrame(rows)
+    return _finalize_scoreboard(result)
 
+
+def _finalize_scoreboard(result: pd.DataFrame) -> pd.DataFrame:
+    """Tambahkan baris total (SMM) dengan agregasi yang konsisten untuk semua tabel scoreboard."""
     total = {"CABANG": "SMM"}
     for col in ["OMSET SAMURAI", "EXPECTED VALUE", "HARI INI", "S/D HARI INI",
                 "TOTAL GAP SAMURAI", "PERIODE BULAN LALU", "PERIODE BULAN INI"]:
@@ -514,8 +527,91 @@ def build_scoreboard(df_kategori: pd.DataFrame, df_target: pd.DataFrame, target_
     )
     total["SISA HARI"] = sisa_hari_repr
 
-    result = pd.concat([result, pd.DataFrame([total])], ignore_index=True)
-    return result
+    return pd.concat([result, pd.DataFrame([total])], ignore_index=True)
+
+
+def build_scoreboard_corporate(df_corp: pd.DataFrame, df_target: pd.DataFrame,
+                                branches: list, tanggal_acuan: date) -> pd.DataFrame:
+    """Versi Scoreboard untuk Omset Marketing Corporate, yang datanya bulanan (Tahun, Bulan, Omset),
+    bukan harian. 'HARI INI' tidak tersedia (data tidak punya tanggal spesifik)."""
+    bulan_ini_awal = pd.Timestamp(tanggal_acuan.replace(day=1))
+    bulan_lalu_akhir = bulan_ini_awal - timedelta(days=1)
+    ym_acuan = tanggal_acuan.year * 100 + tanggal_acuan.month
+
+    rows = []
+    for cabang in branches:
+        sub = df_corp[df_corp["Cabang"] == cabang] if not df_corp.empty else df_corp
+        sub_ym = (sub["Tahun"] * 100 + sub["Bulan"]) if not sub.empty else pd.Series(dtype="int64")
+
+        trow = None
+        if not df_target.empty:
+            cand = df_target[
+                (df_target["Cabang"] == cabang)
+                & (df_target["PeriodeMulai"] <= tanggal_acuan)
+                & (df_target["PeriodeSelesai"] >= tanggal_acuan)
+            ]
+            if not cand.empty:
+                trow = cand.iloc[0]
+
+        target = total_hari = hari_berjalan = sisa_hari = omset_harian = expected_value = None
+        periode_mulai = None
+        if trow is not None:
+            target = float(trow["TargetCorporate"])
+            periode_mulai = trow["PeriodeMulai"]
+            periode_selesai = trow["PeriodeSelesai"]
+            total_hari = (periode_selesai - periode_mulai).days + 1
+            hari_berjalan = max(0, min(total_hari, (tanggal_acuan - periode_mulai).days + 1))
+            sisa_hari = total_hari - hari_berjalan
+            omset_harian = target / total_hari if total_hari else None
+            expected_value = omset_harian * hari_berjalan if omset_harian is not None else None
+
+        if periode_mulai is not None:
+            ym_mulai = periode_mulai.year * 100 + periode_mulai.month
+            sd_hari_ini = sub.loc[(sub_ym >= ym_mulai) & (sub_ym <= ym_acuan), "Omset"].sum() if not sub.empty else 0
+        else:
+            sd_hari_ini = sub.loc[sub_ym <= ym_acuan, "Omset"].sum() if not sub.empty else 0
+
+        pct = (sd_hari_ini / expected_value) if expected_value else None
+        gap_vs_expected = (sd_hari_ini - expected_value) if expected_value is not None else None
+        total_gap_samurai = (target - sd_hari_ini) if target is not None else None
+        kejar_perhari = (total_gap_samurai / sisa_hari) if sisa_hari else None
+
+        hari_lalu_terpakai = calendar.monthrange(bulan_lalu_akhir.year, bulan_lalu_akhir.month)[1]
+        omset_bulan_lalu = (
+            sub.loc[(sub["Tahun"] == bulan_lalu_akhir.year) & (sub["Bulan"] == bulan_lalu_akhir.month), "Omset"].sum()
+            if not sub.empty else 0
+        )
+        periode_bulan_lalu = omset_bulan_lalu / hari_lalu_terpakai if hari_lalu_terpakai else 0
+
+        hari_ini_terpakai = (pd.Timestamp(tanggal_acuan) - bulan_ini_awal).days + 1
+        omset_bulan_ini = (
+            sub.loc[(sub["Tahun"] == tanggal_acuan.year) & (sub["Bulan"] == tanggal_acuan.month), "Omset"].sum()
+            if not sub.empty else 0
+        )
+        periode_bulan_ini = omset_bulan_ini / hari_ini_terpakai if hari_ini_terpakai > 0 else 0
+
+        gap_rata2 = periode_bulan_ini - periode_bulan_lalu
+
+        rows.append(
+            {
+                "CABANG": cabang,
+                "OMSET SAMURAI": target,
+                "OMSET HARIAN (DR TARGET)": omset_harian,
+                "EXPECTED VALUE": expected_value,
+                "HARI INI": None,
+                "S/D HARI INI": sd_hari_ini,
+                "% PENCAPAIAN": pct,
+                "GAP VS EXPECTED": gap_vs_expected,
+                "TOTAL GAP SAMURAI": total_gap_samurai,
+                "KEJAR TARGET PERHARI": kejar_perhari,
+                "PERIODE BULAN LALU": periode_bulan_lalu,
+                "PERIODE BULAN INI": periode_bulan_ini,
+                "GAP": gap_rata2,
+                "SISA HARI": sisa_hari,
+            }
+        )
+
+    return _finalize_scoreboard(pd.DataFrame(rows))
 
 
 MONEY_COLS = [
@@ -526,6 +622,7 @@ MONEY_COLS = [
 
 
 def style_scoreboard(df: pd.DataFrame):
+    """Dipakai untuk fallback (mis. export). Untuk tampilan utama pakai render_scoreboard_html."""
     display_df = df.drop(columns=["SISA HARI"]).copy()
 
     def color_pct(v):
@@ -558,6 +655,81 @@ def style_scoreboard(df: pd.DataFrame):
     return sty
 
 
+# Grup kolom & warna banner, meniru gaya scoreboard existing (abu/hijau/oranye/biru)
+_SCOREBOARD_GROUPS = [
+    ("DETAIL TARGET", ["OMSET SAMURAI", "OMSET HARIAN (DR TARGET)", "EXPECTED VALUE"], "#6b7280"),
+    ("DETAIL PENCAPAIAN", ["HARI INI", "S/D HARI INI", "% PENCAPAIAN"], "#2e7d32"),
+    ("DETAIL GAP", ["GAP VS EXPECTED", "TOTAL GAP SAMURAI", "KEJAR TARGET PERHARI"], "#e65100"),
+    ("MONITORING PROGRESS RATA-RATA / HARI", ["PERIODE BULAN LALU", "PERIODE BULAN INI", "GAP"], "#1565c0"),
+]
+
+
+def _cell_color(col: str, v) -> str:
+    if pd.isna(v):
+        return ""
+    if col == "% PENCAPAIAN":
+        if v >= 1:
+            return "background-color:#c6efce;color:#006100"
+        if v >= 0.8:
+            return "background-color:#ffeb9c;color:#9c6500"
+        return "background-color:#ffc7ce;color:#9c0006"
+    if col in ("GAP VS EXPECTED", "GAP"):
+        return "background-color:#c6efce;color:#006100" if v >= 0 else "background-color:#ffc7ce;color:#9c0006"
+    if col == "TOTAL GAP SAMURAI":
+        return "background-color:#ffc7ce;color:#9c0006" if v > 0 else "background-color:#c6efce;color:#006100"
+    return ""
+
+
+def render_scoreboard_html(title: str, df: pd.DataFrame, accent: str = "#1f2937") -> str:
+    cols = ["CABANG"] + [c for _, group_cols, _ in _SCOREBOARD_GROUPS for c in group_cols]
+
+    header_group_html = f'<th rowspan="2" style="background:{accent};color:white;padding:8px;text-align:left;">CABANG</th>'
+    for gname, gcols, gcolor in _SCOREBOARD_GROUPS:
+        header_group_html += (
+            f'<th colspan="{len(gcols)}" style="background:{gcolor};color:white;padding:6px;'
+            f'text-align:center;font-size:12px;">{gname}</th>'
+        )
+
+    header_col_html = ""
+    for _, gcols, gcolor in _SCOREBOARD_GROUPS:
+        for c in gcols:
+            header_col_html += (
+                f'<th style="background:{gcolor}22;color:#111;padding:6px 8px;text-align:right;'
+                f'font-size:11px;border:1px solid #e5e7eb;white-space:nowrap;">{c}</th>'
+            )
+
+    body_html = ""
+    for _, row in df.iterrows():
+        is_total = row["CABANG"] == "SMM"
+        row_bg = "#eef2f7" if is_total else "#ffffff"
+        fw = "700" if is_total else "400"
+        body_html += f'<tr style="background:{row_bg};font-weight:{fw};">'
+        body_html += f'<td style="padding:5px 8px;border:1px solid #e5e7eb;">{row["CABANG"]}</td>'
+        for _, gcols, _ in _SCOREBOARD_GROUPS:
+            for c in gcols:
+                v = row[c]
+                txt = format_percent(v) if c == "% PENCAPAIAN" else format_number(v)
+                color = _cell_color(c, v)
+                body_html += (
+                    f'<td style="padding:5px 8px;border:1px solid #e5e7eb;text-align:right;{color}">{txt}</td>'
+                )
+        body_html += "</tr>"
+
+    return f"""
+    <div style="margin-bottom:28px;overflow-x:auto;">
+      <table style="border-collapse:collapse;width:100%;font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:13px;">
+        <tr>
+          <td colspan="{len(cols)}" style="background:{accent};color:white;padding:10px 14px;
+              font-size:17px;font-weight:700;letter-spacing:.3px;">{title}</td>
+        </tr>
+        <tr>{header_group_html}</tr>
+        <tr>{header_col_html}</tr>
+        {body_html}
+      </table>
+    </div>
+    """
+
+
 # --------------------------------------------------------------------------------------
 # Sidebar: upload data
 # --------------------------------------------------------------------------------------
@@ -566,7 +738,7 @@ st.sidebar.title("📥 Data")
 
 st.sidebar.caption(
     "Upload file data per cabang (masing-masing file = data 1 cabang, kolom minimal: "
-    "TGL FAKTUR, KATEGORI PENJUALAN, TOTAL HARGA). Bisa pilih banyak file sekaligus, sampai 50 file."
+    "TGL FAKTUR, KATEGORI BARANG, TOTAL HARGA). Bisa pilih banyak file sekaligus, sampai 50 file."
 )
 main_uploads = st.sidebar.file_uploader(
     "Upload file data cabang", type=["xlsx"], accept_multiple_files=True, key="main_uploads"
@@ -712,6 +884,17 @@ tab_ringkasan, tab_scoreboard = st.tabs(["📈 Ringkasan", "🏆 Scoreboard"])
 # TAB 1: Ringkasan
 # --------------------------------------------------------------------------------------
 
+def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: str) -> str:
+    return f"""
+    <div style="background:linear-gradient(135deg,{color1},{color2});border-radius:14px;
+                padding:16px 18px;color:white;box-shadow:0 2px 8px rgba(0,0,0,.12);height:100%;">
+      <div style="font-size:26px;line-height:1;">{icon}</div>
+      <div style="font-size:13px;opacity:.9;margin-top:8px;">{label}</div>
+      <div style="font-size:22px;font-weight:700;margin-top:2px;">{format_rupiah(value)}</div>
+    </div>
+    """
+
+
 with tab_ringkasan:
     omset_all = f_main["Omset"].sum()
     omset_service = f_main.loc[f_main["Kelompok"] == "Service", "Omset"].sum()
@@ -719,10 +902,15 @@ with tab_ringkasan:
     omset_corporate = f_corp["Omset"].sum()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Omset All", format_rupiah(omset_all))
-    c2.metric("Omset Service", format_rupiah(omset_service))
-    c3.metric("Omset Gadget & Aksesoris", format_rupiah(omset_gadget))
-    c4.metric("Omset Marketing Corporate", format_rupiah(omset_corporate))
+    c1.markdown(render_kpi_card("Omset All", omset_all, "#111827", "#374151", "📊"), unsafe_allow_html=True)
+    c2.markdown(render_kpi_card("Omset Service", omset_service, "#0f766e", "#14b8a6", "🛠️"), unsafe_allow_html=True)
+    c3.markdown(render_kpi_card("Omset Gadget & Aksesoris", omset_gadget, "#6d28d9", "#a78bfa", "📱"), unsafe_allow_html=True)
+    c4.markdown(render_kpi_card("Omset Marketing Corporate", omset_corporate, "#b45309", "#f59e0b", "🤝"), unsafe_allow_html=True)
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    st.caption(
+        "Lihat persentase pencapaian target per cabang (dengan warna hijau/kuning/merah) di tab **🏆 Scoreboard**."
+    )
 
     st.markdown("---")
     st.subheader("Tren Omset per Bulan")
@@ -776,10 +964,19 @@ with tab_ringkasan:
         fig_branch.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)")
         st.plotly_chart(fig_branch, width="stretch")
     with bcol2:
-        display_df = by_branch.copy()
-        for col in display_df.columns[1:]:
-            display_df[col] = display_df[col].apply(format_rupiah)
-        st.dataframe(display_df, width="stretch", hide_index=True)
+        num_cols = list(by_branch.columns[1:])
+        try:
+            sty = (
+                by_branch.style
+                .background_gradient(cmap="RdYlGn", subset=num_cols, axis=0)
+                .format({c: format_rupiah for c in num_cols})
+            )
+            st.dataframe(sty, width="stretch", hide_index=True)
+        except ImportError:
+            display_df = by_branch.copy()
+            for col in num_cols:
+                display_df[col] = display_df[col].apply(format_rupiah)
+            st.dataframe(display_df, width="stretch", hide_index=True)
 
     st.caption(
         "Omset All & Omset Service & Omset Gadget dihitung dari data cabang yang diupload. "
@@ -791,29 +988,51 @@ with tab_ringkasan:
 # --------------------------------------------------------------------------------------
 
 with tab_scoreboard:
+    sisa_hari_caption = ""
+    if not df_target.empty:
+        cand = df_target[(df_target["PeriodeMulai"] <= tanggal_acuan) & (df_target["PeriodeSelesai"] >= tanggal_acuan)]
+        if not cand.empty:
+            sisa = (cand.iloc[0]["PeriodeSelesai"] - tanggal_acuan).days
+            sisa_hari_caption = f" · Sisa hari periode: **{sisa}**"
     st.caption(
-        f"Tanggal acuan: **{tanggal_acuan.strftime('%d/%m/%Y')}**. "
+        f"📅 Tanggal acuan: **{tanggal_acuan.strftime('%d/%m/%Y')}**{sisa_hari_caption}. "
         "Ubah di sidebar kalau mau lihat posisi di tanggal lain."
     )
 
     if df_target.empty:
         st.info(
             "Belum ada data Target. Download template Target di sidebar, isi Cabang / Periode Mulai / "
-            "Periode Selesai / Target Service / Target Gadget & Aksesoris, lalu upload. Tanpa data ini, "
-            "kolom Target / Expected Value / % Pencapaian / Gap / Kejar Target tidak bisa dihitung — "
-            "tabel di bawah tetap tampil dengan kolom lain saja."
+            "Periode Selesai / Target Service / Target Gadget & Aksesoris / Target Marketing Corporate, "
+            "lalu upload. Tanpa data ini, kolom Target / Expected Value / % Pencapaian / Gap / Kejar Target "
+            "tidak bisa dihitung — tabel di bawah tetap tampil dengan kolom lain saja."
         )
 
     branches_sb = sel_cabang if sel_cabang else cabang_options
 
-    kategori_map = {
-        "Omset All": (df_main, "TargetAll"),
-        "Omset Service": (df_main[df_main["Kelompok"] == "Service"], "TargetService"),
-        "Omset Gadget & Aksesoris": (df_main[df_main["Kelompok"] == "Gadget & Aksesoris"], "TargetGadget"),
-    }
+    kategori_map = [
+        ("SCOREBOARD OMSET ALL", df_main, "TargetAll", "#111827"),
+        ("SCOREBOARD OMSET SERVICE", df_main[df_main["Kelompok"] == "Service"], "TargetService", "#0f766e"),
+        ("SCOREBOARD OMSET GADGET & AKSESORIS", df_main[df_main["Kelompok"] == "Gadget & Aksesoris"], "TargetGadget", "#6d28d9"),
+    ]
 
-    for label, (subset, target_col) in kategori_map.items():
-        st.subheader(f"Scoreboard {label}")
+    for title, subset, target_col, accent in kategori_map:
         board = build_scoreboard(subset, df_target, target_col, branches_sb, tanggal_acuan)
-        st.dataframe(style_scoreboard(board), width="stretch", hide_index=True, height=(len(board) + 1) * 36)
-        st.markdown("")
+        st.markdown(render_scoreboard_html(title, board, accent), unsafe_allow_html=True)
+
+    st.markdown(
+        render_scoreboard_html(
+            "SCOREBOARD OMSET MARKETING CORPORATE",
+            build_scoreboard_corporate(df_corp, df_target, branches_sb, tanggal_acuan),
+            "#b45309",
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Data Marketing Corporate bersifat bulanan (bukan harian), jadi kolom **HARI INI** tidak tersedia "
+        "(ditampilkan \"-\")."
+    )
+
+    st.markdown(
+        "**Cara baca warna:** hijau = sudah di atas ekspektasi / target tercapai, "
+        "kuning = mendekati (80-100% dari ekspektasi), merah = di bawah ekspektasi / masih ada gap."
+    )
