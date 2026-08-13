@@ -2,8 +2,10 @@
 
 Dashboard Streamlit dengan 2 tampilan:
 
-- **Tab Ringkasan** — kartu KPI berwarna untuk Omset All, Omset Service, Omset Gadget & Aksesoris, Omset Marketing Corporate + tren bulanan + tabel omset per cabang, bisa difilter Tahun / Bulan / Cabang.
+- **Tab Ringkasan** — kartu KPI berwarna untuk Omset All, Omset Service, Omset Gadget & Aksesoris, Omset Marketing Corporate, masing-masing dengan badge **% pencapaian terhadap target**, + tren bulanan + tabel omset per cabang, bisa difilter Tahun / Bulan / Cabang.
 - **Tab Scoreboard** — tabel per cabang gaya scoreboard berwarna (mengikuti contoh existing: header hijau/oranye/biru per grup kolom, sel hijau/kuning/merah sesuai pencapaian) untuk 4 kategori: **Omset All, Omset Service, Omset Gadget & Aksesoris, Omset Marketing Corporate** — lengkap dengan Target, Expected Value, % Pencapaian, Gap, Kejar Target Per Hari, dan rata-rata omset bulan lalu vs bulan ini.
+
+Urutan cabang di semua tabel/grafik mengikuti urutan dashboard existing (Klender, Ceger, Bintara, Radjiman, ... Cibubur), bukan abjad.
 
 Semua data diisi lewat tombol upload di sidebar — tidak perlu edit apapun di kode / repo GitHub.
 
@@ -23,7 +25,7 @@ streamlit run app.py
 
 2. **File Data Marketing Corporate** (opsional, terpisah, dipakai di tab Ringkasan): kolom `Tahun`, `Bulan`, `Cabang`, `Omset`. Template ada di sidebar.
 
-3. **File Data Target** (opsional, dipakai di tab Scoreboard): kolom `Cabang`, `Periode Mulai`, `Periode Selesai`, `Target Service`, `Target Gadget & Aksesoris`, `Target Marketing Corporate`. Target Omset All dihitung otomatis (Service + Gadget & Aksesoris). Template ada di sidebar.
+3. **Target & Expected Value — otomatis kalau memungkinkan.** Kalau file yang diupload di poin 1 punya sheet **"Scoreboard"** (seperti file master "Dashboard 6 Pilar MFlash" yang biasa dipakai), Target (OMSET SAMURAI) & periodenya otomatis dibaca dari situ — **tidak perlu input manual**. Kalau tidak ada sheet itu, upload **File Data Target** terpisah (opsional): kolom `Cabang`, `Periode Mulai`, `Periode Selesai`, `Target Service`, `Target Gadget & Aksesoris`, `Target Marketing Corporate`. Target Omset All dihitung otomatis (Service + Gadget & Aksesoris). Template ada di sidebar. File Target manual ini selalu diprioritaskan kalau ada.
    - Kalau target berganti tiap periode (mis. tiap 3 bulan), tambahkan baris baru per periode — sistem otomatis pakai baris yang periodenya mencakup "Tanggal Acuan".
 
 ## Cara baca kolom Scoreboard

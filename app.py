@@ -63,6 +63,21 @@ BULAN_ALIAS = {
 
 KATEGORI_TABS = ["Omset All", "Omset Service", "Omset Gadget & Aksesoris"]
 
+# Urutan cabang default, mengikuti urutan di dashboard/scoreboard existing (bukan abjad).
+# Cabang yang tidak ada di daftar ini otomatis ditambahkan di akhir (urut abjad).
+BRANCH_ORDER = [
+    "KLENDER", "CEGER", "BINTARA", "RADJIMAN", "JATIMULYA", "DRAMAGA", "CONDET",
+    "JATIBENING", "SAWANGAN", "WARBONG", "CINERE", "CIBINONG", "KARAWANG",
+    "JATIWARINGIN", "CIKAMPEK", "CILANGKAP", "PEJATEN", "CIBUBUR",
+]
+_BRANCH_RANK = {b: i for i, b in enumerate(BRANCH_ORDER)}
+
+
+def order_branches(branches) -> list:
+    """Urutkan daftar cabang sesuai BRANCH_ORDER; cabang baru/tak dikenal ditaruh di akhir (abjad)."""
+    branches = list(branches)
+    return sorted(branches, key=lambda b: (_BRANCH_RANK.get(b, len(BRANCH_ORDER)), b))
+
 
 # --------------------------------------------------------------------------------------
 # Helper umum
@@ -328,6 +343,175 @@ def make_corporate_template() -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+# --------------------------------------------------------------------------------------
+# Auto-ekstrak Target dari sheet "Scoreboard" (kalau file master diupload apa adanya,
+# targetnya tidak perlu diinput ulang manual)
+# --------------------------------------------------------------------------------------
+
+_SECTION_PATTERN = re.compile(r"SCOREBOARD\s+OMSET\s+(ALL|SERVICE|GADGET\s*&?\s*AKSESORIS)", re.IGNORECASE)
+_TARGET_DF_COLUMNS = ["Cabang", "PeriodeMulai", "PeriodeSelesai", "TargetService", "TargetGadget", "TargetAll", "TargetCorporate"]
+
+
+def _empty_target_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=_TARGET_DF_COLUMNS)
+
+
+@st.cache_data(show_spinner=False)
+def extract_scoreboard_target(file_bytes: bytes) -> pd.DataFrame:
+    """Cari sheet 'Scoreboard' dan baca bagian SCOREBOARD OMSET SERVICE / GADGET & AKSESORIS
+    untuk mengambil OMSET SAMURAI (target) & OMSET HARIAN per cabang, lalu turunkan periode
+    target (Periode Mulai/Selesai) dari TANGGAL + SISA HARI di section yang sama."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001
+        return _empty_target_df()
+
+    sheet_name = next((n for n in wb.sheetnames if "scoreboard" in n.strip().lower()), None)
+    if sheet_name is None:
+        return _empty_target_df()
+
+    ws = wb[sheet_name]
+    rows = list(ws.iter_rows(min_row=1, max_row=min(ws.max_row, 500), values_only=True))
+
+    sections = {}  # kategori -> {"tanggal":date, "sisa_hari":int, "branches": {cabang: (target, omset_harian)}}
+
+    i = 0
+    while i < len(rows):
+        row = rows[i]
+        title_cell = next((str(c) for c in row if isinstance(c, str) and _SECTION_PATTERN.search(c)), None)
+        if title_cell:
+            m = _SECTION_PATTERN.search(title_cell)
+            kategori = m.group(1).upper().replace("  ", " ")
+            if "GADGET" in kategori:
+                kategori = "GADGET & AKSESORIS"
+
+            tanggal = None
+            if any(isinstance(c, str) and c.strip().upper() == "TANGGAL" for c in row):
+                for c in row:
+                    if isinstance(c, (datetime, date)):
+                        tanggal = c.date() if isinstance(c, datetime) else c
+                        break
+
+            sisa_hari = None
+            if i + 1 < len(rows):
+                next_row = rows[i + 1]
+                if any(isinstance(c, str) and c.strip().upper() == "SISA HARI" for c in next_row):
+                    for c in next_row:
+                        if isinstance(c, (int, float)) and not isinstance(c, bool):
+                            sisa_hari = int(c)
+                            break
+
+            header_row_idx = None
+            col_idx = {}
+            for j in range(i + 1, min(i + 8, len(rows))):
+                hrow = rows[j]
+                if any(isinstance(c, str) and c.strip().upper() == "CABANG" for c in hrow):
+                    for k, c in enumerate(hrow):
+                        if isinstance(c, str) and c.strip():
+                            col_idx[c.strip().upper()] = k
+                    header_row_idx = j
+                    break
+
+            branches = {}
+            if header_row_idx is not None and "CABANG" in col_idx and "OMSET SAMURAI" in col_idx:
+                cabang_col = col_idx["CABANG"]
+                target_col = col_idx["OMSET SAMURAI"]
+                harian_col = col_idx.get("OMSET HARIAN (DR TARGET SAMURAI)")
+                for j in range(header_row_idx + 1, len(rows)):
+                    brow = rows[j]
+                    if cabang_col >= len(brow):
+                        break
+                    cval = brow[cabang_col]
+                    if cval is None or str(cval).strip() == "":
+                        break
+                    cname = str(cval).strip().upper()
+                    if cname in ("SMM", "TOTAL", "GRAND TOTAL"):
+                        break
+                    tval = brow[target_col] if target_col < len(brow) else None
+                    hval = brow[harian_col] if harian_col is not None and harian_col < len(brow) else None
+                    try:
+                        tval = float(tval) if tval is not None else None
+                    except (TypeError, ValueError):
+                        tval = None
+                    try:
+                        hval = float(hval) if hval is not None else None
+                    except (TypeError, ValueError):
+                        hval = None
+                    branches[cname] = (tval, hval)
+
+            if tanggal is not None and sisa_hari is not None and branches:
+                sections[kategori] = {"tanggal": tanggal, "sisa_hari": sisa_hari, "branches": branches}
+            i = header_row_idx if header_row_idx is not None else i + 1
+        i += 1
+
+    def _period(section):
+        tanggal = section["tanggal"]
+        sisa = section["sisa_hari"]
+        return tanggal, sisa
+
+    svc = sections.get("SERVICE")
+    gdg = sections.get("GADGET & AKSESORIS")
+    if not svc and not gdg:
+        return _empty_target_df()
+
+    all_branches = set((svc or {}).get("branches", {})).union(set((gdg or {}).get("branches", {})))
+    rows_out = []
+    for cabang in all_branches:
+        svc_target, svc_harian = (svc["branches"].get(cabang, (None, None)) if svc else (None, None))
+        gdg_target, gdg_harian = (gdg["branches"].get(cabang, (None, None)) if gdg else (None, None))
+
+        ref_section = svc if svc and cabang in svc["branches"] else gdg
+        if ref_section is None:
+            continue
+        tanggal, sisa = _period(ref_section)
+
+        total_hari = None
+        if svc_target and svc_harian:
+            total_hari = round(svc_target / svc_harian)
+        elif gdg_target and gdg_harian:
+            total_hari = round(gdg_target / gdg_harian)
+        if not total_hari:
+            continue
+
+        periode_selesai = tanggal + timedelta(days=sisa)
+        periode_mulai = periode_selesai - timedelta(days=total_hari - 1)
+
+        rows_out.append(
+            {
+                "Cabang": cabang,
+                "PeriodeMulai": periode_mulai,
+                "PeriodeSelesai": periode_selesai,
+                "TargetService": svc_target or 0.0,
+                "TargetGadget": gdg_target or 0.0,
+                "TargetAll": (svc_target or 0.0) + (gdg_target or 0.0),
+                "TargetCorporate": 0.0,
+            }
+        )
+
+    return pd.DataFrame(rows_out, columns=_TARGET_DF_COLUMNS) if rows_out else _empty_target_df()
+
+
+def extract_scoreboard_target_all(main_dir: str) -> pd.DataFrame:
+    """Jalankan extract_scoreboard_target untuk semua file di main_dir, gabungkan hasilnya."""
+    frames = []
+    for fname in sorted(os.listdir(main_dir)):
+        if not fname.lower().endswith(".xlsx"):
+            continue
+        try:
+            with open(os.path.join(main_dir, fname), "rb") as f:
+                file_bytes = f.read()
+            df = extract_scoreboard_target(file_bytes)
+            if not df.empty:
+                frames.append(df)
+        except Exception:  # noqa: BLE001
+            continue
+    if not frames:
+        return _empty_target_df()
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["Cabang", "PeriodeMulai", "PeriodeSelesai"], keep="last")
+    return combined
 
 
 # --------------------------------------------------------------------------------------
@@ -843,14 +1027,25 @@ if os.path.exists(CORPORATE_DATA_PATH):
     except ValueError as e:
         st.warning(f"Data Marketing Corporate tidak dipakai: {e}")
 
-df_target = pd.DataFrame(columns=["Cabang", "PeriodeMulai", "PeriodeSelesai", "TargetService", "TargetGadget", "TargetAll"])
+df_target = _empty_target_df()
+target_source = None
 if os.path.exists(TARGET_DATA_PATH):
     with open(TARGET_DATA_PATH, "rb") as f:
         target_bytes = f.read()
     try:
         df_target = load_target_data(target_bytes)
+        if not df_target.empty:
+            target_source = "manual"
     except ValueError as e:
         st.warning(f"Data Target tidak dipakai: {e}")
+
+if df_target.empty:
+    # Belum ada file Target manual -> coba ambil otomatis dari sheet "Scoreboard"
+    # kalau file master (yang berisi sheet itu) ada di antara file cabang yang diupload.
+    df_target_auto = extract_scoreboard_target_all(MAIN_DATA_DIR)
+    if not df_target_auto.empty:
+        df_target = df_target_auto
+        target_source = "auto"
 
 # --------------------------------------------------------------------------------------
 # Filter (dipakai di tab Ringkasan)
@@ -861,7 +1056,7 @@ st.sidebar.title("🔎 Filter Ringkasan")
 
 tahun_options = sorted(set(df_main["Tahun"]).union(set(df_corp["Tahun"])), reverse=True)
 bulan_options = list(range(1, 13))
-cabang_options = sorted(set(df_main["Cabang"]).union(set(df_corp["Cabang"])).union(set(df_target["Cabang"])))
+cabang_options = order_branches(set(df_main["Cabang"]).union(set(df_corp["Cabang"])).union(set(df_target["Cabang"])))
 
 sel_tahun = st.sidebar.multiselect("Tahun", tahun_options, default=tahun_options)
 sel_bulan = st.sidebar.multiselect("Bulan", bulan_options, default=bulan_options, format_func=lambda m: BULAN_ID[m - 1])
@@ -878,19 +1073,60 @@ if not sel_tahun or not sel_bulan or not sel_cabang:
 f_main = df_main[df_main["Tahun"].isin(sel_tahun) & df_main["Bulan"].isin(sel_bulan) & df_main["Cabang"].isin(sel_cabang)]
 f_corp = df_corp[df_corp["Tahun"].isin(sel_tahun) & df_corp["Bulan"].isin(sel_bulan) & df_corp["Cabang"].isin(sel_cabang)]
 
+# --------------------------------------------------------------------------------------
+# Hitung scoreboard sekali (dipakai di tab Ringkasan buat badge % dan di tab Scoreboard)
+# --------------------------------------------------------------------------------------
+
+branches_sb = sel_cabang if sel_cabang else cabang_options
+
+kategori_map = [
+    ("SCOREBOARD OMSET ALL", df_main, "TargetAll", "#111827"),
+    ("SCOREBOARD OMSET SERVICE", df_main[df_main["Kelompok"] == "Service"], "TargetService", "#0f766e"),
+    ("SCOREBOARD OMSET GADGET & AKSESORIS", df_main[df_main["Kelompok"] == "Gadget & Aksesoris"], "TargetGadget", "#6d28d9"),
+]
+boards = {}
+for title, subset, target_col, accent in kategori_map:
+    boards[title] = (build_scoreboard(subset, df_target, target_col, branches_sb, tanggal_acuan), accent)
+
+board_corp = build_scoreboard_corporate(df_corp, df_target, branches_sb, tanggal_acuan)
+
+
+def _smm_pct(board: pd.DataFrame):
+    smm = board[board["CABANG"] == "SMM"]
+    if smm.empty:
+        return None
+    v = smm.iloc[0]["% PENCAPAIAN"]
+    return None if pd.isna(v) else v
+
+
+pct_all = _smm_pct(boards["SCOREBOARD OMSET ALL"][0])
+pct_service = _smm_pct(boards["SCOREBOARD OMSET SERVICE"][0])
+pct_gadget = _smm_pct(boards["SCOREBOARD OMSET GADGET & AKSESORIS"][0])
+pct_corp = _smm_pct(board_corp)
+
 tab_ringkasan, tab_scoreboard = st.tabs(["📈 Ringkasan", "🏆 Scoreboard"])
 
 # --------------------------------------------------------------------------------------
 # TAB 1: Ringkasan
 # --------------------------------------------------------------------------------------
 
-def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: str) -> str:
+def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: str, pct=None) -> str:
+    badge = ""
+    if pct is not None:
+        badge_bg = "rgba(198,239,206,.9)" if pct >= 1 else ("rgba(255,235,156,.9)" if pct >= 0.8 else "rgba(255,199,206,.9)")
+        badge_fg = "#006100" if pct >= 1 else ("#9c6500" if pct >= 0.8 else "#9c0006")
+        badge = (
+            f'<div style="display:inline-block;background:{badge_bg};color:{badge_fg};'
+            f'border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;margin-top:6px;">'
+            f'{format_percent(pct)} dari target</div>'
+        )
     return f"""
     <div style="background:linear-gradient(135deg,{color1},{color2});border-radius:14px;
                 padding:16px 18px;color:white;box-shadow:0 2px 8px rgba(0,0,0,.12);height:100%;">
       <div style="font-size:26px;line-height:1;">{icon}</div>
       <div style="font-size:13px;opacity:.9;margin-top:8px;">{label}</div>
       <div style="font-size:22px;font-weight:700;margin-top:2px;">{format_rupiah(value)}</div>
+      {badge}
     </div>
     """
 
@@ -902,14 +1138,15 @@ with tab_ringkasan:
     omset_corporate = f_corp["Omset"].sum()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(render_kpi_card("Omset All", omset_all, "#111827", "#374151", "📊"), unsafe_allow_html=True)
-    c2.markdown(render_kpi_card("Omset Service", omset_service, "#0f766e", "#14b8a6", "🛠️"), unsafe_allow_html=True)
-    c3.markdown(render_kpi_card("Omset Gadget & Aksesoris", omset_gadget, "#6d28d9", "#a78bfa", "📱"), unsafe_allow_html=True)
-    c4.markdown(render_kpi_card("Omset Marketing Corporate", omset_corporate, "#b45309", "#f59e0b", "🤝"), unsafe_allow_html=True)
+    c1.markdown(render_kpi_card("Omset All", omset_all, "#111827", "#374151", "📊", pct_all), unsafe_allow_html=True)
+    c2.markdown(render_kpi_card("Omset Service", omset_service, "#0f766e", "#14b8a6", "🛠️", pct_service), unsafe_allow_html=True)
+    c3.markdown(render_kpi_card("Omset Gadget & Aksesoris", omset_gadget, "#6d28d9", "#a78bfa", "📱", pct_gadget), unsafe_allow_html=True)
+    c4.markdown(render_kpi_card("Omset Marketing Corporate", omset_corporate, "#b45309", "#f59e0b", "🤝", pct_corp), unsafe_allow_html=True)
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
     st.caption(
-        "Lihat persentase pencapaian target per cabang (dengan warna hijau/kuning/merah) di tab **🏆 Scoreboard**."
+        "Badge % di tiap kartu = pencapaian terhadap target periode berjalan (per Tanggal Acuan di sidebar), "
+        "independen dari filter Tahun/Bulan di atas. Detail per cabang ada di tab **🏆 Scoreboard**."
     )
 
     st.markdown("---")
@@ -956,11 +1193,17 @@ with tab_ringkasan:
     by_branch = pd.concat(
         [by_branch_all, by_branch_service, by_branch_gadget, by_branch_corp], axis=1
     ).astype(float).fillna(0.0).reset_index()
+    branch_order_local = order_branches(by_branch["Cabang"])
+    by_branch["Cabang"] = pd.Categorical(by_branch["Cabang"], categories=branch_order_local, ordered=True)
+    by_branch = by_branch.sort_values("Cabang").reset_index(drop=True)
 
     bcol1, bcol2 = st.columns([2, 1])
     with bcol1:
         branch_long = by_branch.melt(id_vars="Cabang", var_name="Kategori", value_name="Omset")
-        fig_branch = px.bar(branch_long, x="Cabang", y="Omset", color="Kategori", barmode="group")
+        fig_branch = px.bar(
+            branch_long, x="Cabang", y="Omset", color="Kategori", barmode="group",
+            category_orders={"Cabang": branch_order_local},
+        )
         fig_branch.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)")
         st.plotly_chart(fig_branch, width="stretch")
     with bcol2:
@@ -1001,28 +1244,24 @@ with tab_scoreboard:
 
     if df_target.empty:
         st.info(
-            "Belum ada data Target. Download template Target di sidebar, isi Cabang / Periode Mulai / "
-            "Periode Selesai / Target Service / Target Gadget & Aksesoris / Target Marketing Corporate, "
-            "lalu upload. Tanpa data ini, kolom Target / Expected Value / % Pencapaian / Gap / Kejar Target "
-            "tidak bisa dihitung — tabel di bawah tetap tampil dengan kolom lain saja."
+            "Belum ada data Target. Kalau file yang diupload punya sheet **Scoreboard** (seperti file "
+            "master yang biasa dipakai), targetnya otomatis kebaca — coba upload ulang file itu lewat "
+            "'Upload file data cabang'. Atau, download template Target di sidebar, isi manual, lalu upload. "
+            "Tanpa data ini, kolom Target / Expected Value / % Pencapaian / Gap / Kejar Target tidak bisa "
+            "dihitung — tabel di bawah tetap tampil dengan kolom lain saja."
         )
+    elif target_source == "auto":
+        st.success("🎯 Target & Expected Value otomatis terbaca dari sheet **Scoreboard** di file yang diupload.")
+    else:
+        st.success("🎯 Target & Expected Value dihitung dari file Data Target yang diupload.")
 
-    branches_sb = sel_cabang if sel_cabang else cabang_options
-
-    kategori_map = [
-        ("SCOREBOARD OMSET ALL", df_main, "TargetAll", "#111827"),
-        ("SCOREBOARD OMSET SERVICE", df_main[df_main["Kelompok"] == "Service"], "TargetService", "#0f766e"),
-        ("SCOREBOARD OMSET GADGET & AKSESORIS", df_main[df_main["Kelompok"] == "Gadget & Aksesoris"], "TargetGadget", "#6d28d9"),
-    ]
-
-    for title, subset, target_col, accent in kategori_map:
-        board = build_scoreboard(subset, df_target, target_col, branches_sb, tanggal_acuan)
+    for title, (board, accent) in boards.items():
         st.markdown(render_scoreboard_html(title, board, accent), unsafe_allow_html=True)
 
     st.markdown(
         render_scoreboard_html(
             "SCOREBOARD OMSET MARKETING CORPORATE",
-            build_scoreboard_corporate(df_corp, df_target, branches_sb, tanggal_acuan),
+            board_corp,
             "#b45309",
         ),
         unsafe_allow_html=True,
