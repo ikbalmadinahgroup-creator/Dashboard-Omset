@@ -97,6 +97,19 @@ plus % Pencapaian terhadap Expected Value:
 - 🚨 Turun >20% dibanding bulan lalu, atau pencapaian <70% → perlu evaluasi segera.
 - ⚠️ Turun 5-20% dibanding bulan lalu, atau pencapaian 70-84,9% → pantau & tambah aktivasi.
 
+Setiap insight dilengkapi **rencana aksi konkret** yang beda-beda per kategori (bukan saran generik
+yang sama untuk semua cabang), dipecah jadi 🌐 **Online** dan 🏬 **Offline**:
+
+- **Omset Service**: online = refresh promo servis di IG/FB, iklan Meta Ads Click-to-WhatsApp radius
+  cabang, broadcast reminder servis ke database lama; offline = cek sparepart & jadwal teknisi,
+  banner promo servis, cek gratis untuk tarik walk-in, upsell servis tambahan oleh CS.
+- **Penjualan Gadget & Aksesoris**: online = posting katalog & harga terbaru, iklan Meta Ads produk
+  best-seller, broadcast flash sale; offline = cek stok best-seller, display etalase, sebar
+  brosur ke area sekitar, cross-sell aksesoris oleh tim sales.
+- **Marketing Corporate**: online = follow-up leads yang belum closing, update portofolio di
+  LinkedIn, siapkan penawaran bundling/kontrak volume; offline = kunjungan langsung ke calon
+  klien, harga khusus untuk pembelian volume, ikut event/komunitas bisnis lokal.
+
 ### ✅ To-Do List Evaluasi Cabang
 
 Checklist interaktif di bawah insight — setiap item bisa dicentang sebagai penanda "sudah

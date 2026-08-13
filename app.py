@@ -562,9 +562,69 @@ def render_insight_card(title: str, text: str, level: str) -> str:
 _SALES_TOTAL_LABELS = ("SMM", "TOTAL", "GRAND TOTAL", "HEAD OF CORPORATE")
 
 
+_CATEGORY_ACTION_PLANS = {
+    "Omset Service": {
+        "online": [
+            "refresh & post ulang promo harga servis (LCD, baterai, konektor cas, dll) di Instagram/Facebook Story "
+            "& Feed cabang minimal 3-4x/minggu, dengan harga & before-after jelas",
+            "aktifkan atau naikkan budget iklan Meta Ads Click-to-WhatsApp khusus radius cabang ini (cek Cost per "
+            "Messaging Conversation-nya di tab Iklan, prioritaskan creative yang CTR-nya sudah terbukti bagus)",
+            "broadcast WhatsApp ke database customer lama: reminder servis berkala, promo garansi habis, upgrade sparepart",
+        ],
+        "offline": [
+            "cek ketersediaan sparepart & jadwal teknisi supaya antrean servis tidak menumpuk/lambat (kecepatan "
+            "servis = alasan utama customer balik lagi)",
+            "pasang/perbarui spanduk & banner promo servis di depan toko dan titik ramai sekitar cabang",
+            "tawarkan cek gratis (baterai, LCD, port cas) untuk menarik walk-in baru masuk toko",
+            "briefing tim CS untuk selalu tawarkan servis/sparepart tambahan (upsell) ke customer yang sudah datang",
+        ],
+    },
+    "Penjualan Gadget & Aksesoris": {
+        "online": [
+            "posting katalog & harga terbaru HP/aksesoris di Instagram/Facebook/TikTok minimal 3-4x/minggu dengan "
+            "foto produk & harga yang jelas",
+            "jalankan atau optimalkan iklan Meta Ads untuk produk best-seller cabang ini (cek performa campaign "
+            "per cabang di tab Iklan, matikan yang cost-nya tinggi tanpa hasil)",
+            "broadcast promo flash sale / bundling ke database WhatsApp customer",
+        ],
+        "offline": [
+            "cek stok unit best-seller cabang ini supaya tidak kosong saat ada calon pembeli",
+            "perbarui display etalase depan & pasang banner promo yang terlihat dari luar toko",
+            "sebar brosur/flyer ke area sekitar cabang (kantor, sekolah, perumahan dalam radius terdekat)",
+            "briefing tim sales untuk cross-sell aksesoris (case, tempered glass, powerbank) di setiap transaksi",
+        ],
+    },
+    "Marketing Corporate": {
+        "online": [
+            "follow-up ulang leads/kontak corporate yang sempat masuk tapi belum closing lewat WhatsApp/email",
+            "update portofolio & testimoni kerja sama corporate di LinkedIn/company profile untuk menarik leads baru",
+            "siapkan penawaran tertulis khusus (bundling / kontrak volume / harga khusus instansi) yang mudah "
+            "dikirim ke calon klien",
+        ],
+        "offline": [
+            "jadwalkan kunjungan langsung (sales visit) ke calon klien corporate baru di sekitar cabang",
+            "tawarkan harga/kontrak khusus untuk pembelian volume ke kantor/instansi yang sudah jadi langganan",
+            "ikuti event atau komunitas bisnis lokal (asosiasi, gathering) untuk perluas jaringan relasi",
+        ],
+    },
+}
+
+
+def _action_plan_text(category_label: str, urgent: bool) -> str:
+    plan = _CATEGORY_ACTION_PLANS.get(category_label)
+    if not plan:
+        return ""
+    lead = "Rencana aksi (prioritas tinggi)" if urgent else "Rencana aksi"
+    online_txt = "; ".join(plan["online"])
+    offline_txt = "; ".join(plan["offline"])
+    return f" {lead} — 🌐 Online: {online_txt}. 🏬 Offline: {offline_txt}."
+
+
 def generate_sales_insights(board_df: pd.DataFrame, category_label: str, name_label: str = "CABANG"):
     """Rekomendasi otomatis untuk setiap cabang/nama di sebuah scoreboard: tandai penurunan
-    rata-rata omset harian (bulan ini vs bulan lalu) dan pencapaian yang masih di bawah 85%."""
+    rata-rata omset harian (bulan ini vs bulan lalu) dan pencapaian yang masih di bawah 85%,
+    dilengkapi rencana aksi konkret (online & offline) sesuai kategori (Service / Penjualan
+    Gadget & Aksesoris / Marketing Corporate) — bukan saran generik yang sama untuk semua."""
     insights = []
     if board_df is None or board_df.empty or name_label not in board_df.columns:
         return insights
@@ -584,16 +644,15 @@ def generate_sales_insights(board_df: pd.DataFrame, category_label: str, name_la
                 insights.append({
                     "level": "bad", "title": f"{category_label} — {nama}",
                     "text": f"Rata-rata omset harian turun {format_percent(abs(pct_turun))} dibanding bulan lalu "
-                            f"({format_rupiah(bulan_lalu)} → {format_rupiah(bulan_ini)} per hari). Perlu evaluasi "
-                            f"segera: cek ketersediaan stok/teknisi, promo yang sedang berjalan, dan aktivitas "
-                            f"kompetitor di sekitar cabang ini.",
+                            f"({format_rupiah(bulan_lalu)} → {format_rupiah(bulan_ini)} per hari)."
+                            + _action_plan_text(category_label, urgent=True),
                 })
             elif pct_turun <= -0.05:
                 insights.append({
                     "level": "warn", "title": f"{category_label} — {nama}",
                     "text": f"Rata-rata omset harian turun {format_percent(abs(pct_turun))} dibanding bulan lalu "
-                            f"({format_rupiah(bulan_lalu)} → {format_rupiah(bulan_ini)} per hari). Pantau terus, "
-                            f"pertimbangkan tambahan promo/aktivasi lokal supaya tidak berlanjut turun.",
+                            f"({format_rupiah(bulan_lalu)} → {format_rupiah(bulan_ini)} per hari)."
+                            + _action_plan_text(category_label, urgent=False),
                 })
 
         pct = r.get("% PENCAPAIAN")
@@ -606,7 +665,8 @@ def generate_sales_insights(board_df: pd.DataFrame, category_label: str, name_la
             insights.append({
                 "level": "warn" if pct >= 0.7 else "bad",
                 "title": f"{category_label} — {nama}",
-                "text": f"Pencapaian baru {format_percent(pct)} dari expected value (di bawah target 85%).{saran}",
+                "text": f"Pencapaian baru {format_percent(pct)} dari expected value (di bawah target 85%).{saran}"
+                        + _action_plan_text(category_label, urgent=pct < 0.7),
             })
 
     return insights
