@@ -5,14 +5,17 @@ Menampilkan omset untuk 3 kategori utama:
   1. Omset All
   2. Omset Service
   3. Omset Gadget & Aksesoris
-(+ Omset Marketing Corporate, + performa Iklan Meta Ads)
+(+ Omset Marketing Corporate, + performa Iklan Meta Ads, + Walk-in per cabang)
 
-Ada 3 tampilan:
-  - Tab "Ringkasan": kartu KPI berwarna + progress ring % pencapaian + tren bulanan.
+Ada 4 tampilan:
+  - Tab "Ringkasan": kartu KPI berwarna + progress ring % pencapaian + kontribusi Omset All + tren bulanan.
   - Tab "Scoreboard": tabel per cabang gaya scoreboard, riwayat pencapaian harian (ledger
-    permanen, tidak hilang walau harinya sudah lewat), dan insight/rekomendasi perbaikan.
+    permanen, tidak hilang walau harinya sudah lewat), insight/rekomendasi perbaikan yang
+    detail sampai ke eksekusi online/offline, dan to-do list evaluasi cabang.
   - Tab "Iklan (Meta Ads)": performa Messaging Conversation & Cost per Messaging per cabang,
     dengan insight & rekomendasi improvement dari sisi konten maupun funnel.
+  - Tab "Walk-in Cabang": total & rata-rata walk-in (jumlah order servis) per cabang per bulan,
+    dari file "Rincian Pengiriman Pesanan".
 
 Semua data diisi lewat tombol upload (tidak perlu edit source code / repo GitHub).
 Kalau file yang diupload punya sheet "Scoreboard" (file master yang biasa dipakai),
@@ -22,7 +25,6 @@ Jalankan dengan:
     streamlit run app.py
 """
 
-import base64
 import calendar
 import io
 import os
@@ -46,6 +48,8 @@ MAIN_DATA_DIR = os.path.join(DATA_DIR, "main")
 os.makedirs(MAIN_DATA_DIR, exist_ok=True)
 ADS_DATA_DIR = os.path.join(DATA_DIR, "ads")
 os.makedirs(ADS_DATA_DIR, exist_ok=True)
+WALKIN_DATA_DIR = os.path.join(DATA_DIR, "walkin")
+os.makedirs(WALKIN_DATA_DIR, exist_ok=True)
 CORPORATE_DATA_PATH = os.path.join(DATA_DIR, "corporate_data.xlsx")
 TARGET_DATA_PATH = os.path.join(DATA_DIR, "target_data.xlsx")
 HISTORY_LOG_PATH = os.path.join(DATA_DIR, "history_log.csv")
@@ -59,6 +63,7 @@ CORE_COLUMNS = ["TGL FAKTUR", "KATEGORI BARANG", "TOTAL HARGA"]
 REQUIRED_COLUMNS = ["CABANG"] + CORE_COLUMNS
 MAX_MAIN_FILES = 50
 MAX_ADS_FILES = 50
+MAX_WALKIN_FILES = 60
 
 BULAN_ID = [
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -109,6 +114,14 @@ def format_number(value) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "-"
     return f"{value:,.0f}".replace(",", ".")
+
+
+def format_decimal(value, digits=1) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    s = f"{value:,.{digits}f}"
+    s = s.replace(",", "§").replace(".", ",").replace("§", ".")
+    return s
 
 
 def format_percent(value) -> str:
@@ -169,6 +182,23 @@ def branch_from_campaign_name(campaign_name: str) -> str:
             return b
     if "WARUNG" in chunk:
         return "WARBONG"
+    return chunk
+
+
+def branch_from_walkin_filename(filename: str) -> str:
+    """Tebak cabang dari nama file 'Rincian Pengiriman Pesanan', contoh:
+    'rincian_pengiriman_pesanan_011mflashcinere_260813163634.xlsx' -> CINERE."""
+    name = os.path.splitext(os.path.basename(filename))[0]
+    name = re.sub(r"^rincian[_\-]?pengiriman[_\-]?pesanan[_\-]?", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"[_\-]?\d{6,}$", "", name)
+    name = re.sub(r"^\d+", "", name)
+    name = re.sub(r"mflash", "", name, flags=re.IGNORECASE)
+    chunk = re.sub(r"[_\-]+", " ", name).strip().upper()
+    if not chunk:
+        return "TIDAK DIKETAHUI"
+    for b in BRANCH_ORDER:
+        if chunk == b or chunk.startswith(b) or b.startswith(chunk) or b in chunk:
+            return b
     return chunk
 
 
@@ -561,7 +591,6 @@ def render_insight_card(title: str, text: str, level: str) -> str:
 
 _SALES_TOTAL_LABELS = ("SMM", "TOTAL", "GRAND TOTAL", "HEAD OF CORPORATE")
 
-
 _CATEGORY_ACTION_PLANS = {
     "Omset Service": {
         "online": [
@@ -681,6 +710,117 @@ def render_kpi_card_text(label: str, value_text: str, color1: str, color2: str, 
       <div style="font-size:22px;font-weight:700;margin-top:2px;">{value_text}</div>
     </div>
     """
+
+
+# --------------------------------------------------------------------------------------
+# Loader data Walk-in (Rincian Pengiriman Pesanan) - satu file biasanya = satu cabang.
+# Walk-in dihitung dari jumlah NOMOR PENGIRIMAN PESANAN yang UNIK (bukan jumlah baris),
+# karena satu order/pengiriman bisa berisi beberapa baris/item.
+# --------------------------------------------------------------------------------------
+
+_WALKIN_REQUIRED_COLS = ["NOMOR PENGIRIMAN PESANAN", "TGL PENGIRIMAN"]
+_WALKIN_COLUMNS = ["Cabang", "NomorPengiriman", "Tanggal", "Tahun", "Bulan", "SumberFile"]
+
+
+def _find_walkin_sheet(wb):
+    for name in wb.sheetnames:
+        ws = wb[name]
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if header_row is None:
+            continue
+        headers = {str(h).strip().upper() for h in header_row if h is not None}
+        if all(c in headers for c in _WALKIN_REQUIRED_COLS):
+            return ws, header_row
+    return None, None
+
+
+@st.cache_data(show_spinner=False)
+def load_walkin_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
+    # PENTING: file "Rincian Pengiriman Pesanan" dari beberapa sistem service punya tag
+    # <dimension> yang salah (hanya declare A1) walau isinya ribuan baris - kalau dibuka
+    # read_only=True, openpyxl bisa berhenti prematur. Jadi di sini WAJIB full-parse
+    # (bukan read_only) supaya semua baris data ikut kebaca.
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws, header_row = _find_walkin_sheet(wb)
+    if ws is None:
+        raise ValueError(
+            f"Tidak ada sheet dengan kolom {', '.join(_WALKIN_REQUIRED_COLS)}. "
+            f"Sheet yang tersedia: {', '.join(wb.sheetnames)}"
+        )
+    col_idx = {}
+    for i, h in enumerate(header_row):
+        if h is not None:
+            col_idx[str(h).strip().upper()] = i
+
+    branch = branch_from_walkin_filename(filename_hint) if filename_hint else "TIDAK DIKETAHUI"
+    nomor_idx = col_idx["NOMOR PENGIRIMAN PESANAN"]
+    tgl_idx = col_idx["TGL PENGIRIMAN"]
+
+    seen = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if nomor_idx >= len(row) or tgl_idx >= len(row):
+            continue
+        nomor = row[nomor_idx]
+        tgl = row[tgl_idx]
+        if not nomor or not isinstance(tgl, datetime):
+            continue
+        nomor = str(nomor).strip()
+        if nomor not in seen:
+            seen[nomor] = tgl.date()
+
+    rows_out = [
+        {
+            "Cabang": branch, "NomorPengiriman": nomor, "Tanggal": pd.Timestamp(tgl),
+            "Tahun": tgl.year, "Bulan": tgl.month, "SumberFile": filename_hint,
+        }
+        for nomor, tgl in seen.items()
+    ]
+    return pd.DataFrame(rows_out, columns=_WALKIN_COLUMNS)
+
+
+def load_all_walkin_data(walkin_dir: str):
+    files = sorted(f for f in os.listdir(walkin_dir) if f.lower().endswith(".xlsx"))
+    frames, errors = [], []
+    for fname in files:
+        fpath = os.path.join(walkin_dir, fname)
+        try:
+            with open(fpath, "rb") as f:
+                file_bytes = f.read()
+            df = load_walkin_data(file_bytes, filename_hint=fname)
+            if not df.empty:
+                frames.append(df)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{fname}: {e}")
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_WALKIN_COLUMNS)
+    if not combined.empty:
+        combined = combined.drop_duplicates(subset=["Cabang", "NomorPengiriman"], keep="first")
+    return combined, errors
+
+
+def aggregate_walkin_monthly(df: pd.DataFrame) -> pd.DataFrame:
+    """Total walk-in (jumlah NOMOR PENGIRIMAN PESANAN unik) per cabang per bulan, plus
+    rata-rata walk-in per hari. Bulan yang paling baru di seluruh data dianggap 'bulan
+    berjalan' (dibagi hari yang sudah lewat sampai tanggal terakhir tercatat di bulan itu),
+    bulan-bulan sebelumnya dianggap sudah penuh sebulan (dibagi jumlah hari kalender)."""
+    if df.empty:
+        return pd.DataFrame(columns=["Cabang", "Tahun", "Bulan", "TotalWalkin", "HariEfektif", "RataRataPerHari"])
+
+    overall_max = df["Tanggal"].max()
+    latest_ym = (overall_max.year, overall_max.month)
+
+    rows = []
+    for (cabang, tahun, bulan), g in df.groupby(["Cabang", "Tahun", "Bulan"]):
+        total = g["NomorPengiriman"].nunique()
+        if (int(tahun), int(bulan)) == latest_ym:
+            hari_efektif = g["Tanggal"].max().day
+        else:
+            hari_efektif = calendar.monthrange(int(tahun), int(bulan))[1]
+        rata2 = (total / hari_efektif) if hari_efektif else 0.0
+        rows.append({
+            "Cabang": cabang, "Tahun": int(tahun), "Bulan": int(bulan),
+            "TotalWalkin": total, "HariEfektif": hari_efektif, "RataRataPerHari": rata2,
+        })
+    return pd.DataFrame(rows).sort_values(["Tahun", "Bulan", "Cabang"]).reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------------------
@@ -1886,6 +2026,51 @@ if stored_ads_files:
             st.rerun()
 
 st.sidebar.markdown("---")
+st.sidebar.title("🚶 Data Walk-in (Pengiriman Pesanan)")
+st.sidebar.caption(
+    "Upload file 'Rincian Pengiriman Pesanan' per cabang (dari sistem service). Bisa upload banyak "
+    f"file sekaligus, sampai {MAX_WALKIN_FILES} file (1 file = 1 cabang). Dipakai di tab 'Walk-in Cabang'."
+)
+walkin_uploads = st.sidebar.file_uploader(
+    "Upload file Rincian Pengiriman Pesanan", type=["xlsx"], accept_multiple_files=True, key="walkin_uploads"
+)
+if walkin_uploads:
+    existing_walkin = len(os.listdir(WALKIN_DATA_DIR))
+    if existing_walkin + len(walkin_uploads) > MAX_WALKIN_FILES:
+        st.sidebar.error(
+            f"Maksimal {MAX_WALKIN_FILES} file. Saat ini sudah ada {existing_walkin} file tersimpan, "
+            f"hapus beberapa dulu di bawah sebelum upload {len(walkin_uploads)} file baru."
+        )
+    else:
+        saved, failed = 0, []
+        for uf in walkin_uploads:
+            safe_name = sanitize_filename(uf.name)
+            try:
+                with open(os.path.join(WALKIN_DATA_DIR, safe_name), "wb") as f:
+                    f.write(uf.getbuffer())
+                saved += 1
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{uf.name}: {e}")
+        if saved:
+            st.sidebar.success(f"{saved} file walk-in tersimpan.")
+        if failed:
+            st.sidebar.error("Gagal menyimpan:\n" + "\n".join(failed))
+
+stored_walkin_files = sorted(os.listdir(WALKIN_DATA_DIR))
+if stored_walkin_files:
+    with st.sidebar.expander(f"📁 File walk-in tersimpan ({len(stored_walkin_files)}/{MAX_WALKIN_FILES})"):
+        for fname in stored_walkin_files:
+            fc1, fc2 = st.columns([4, 1])
+            fc1.write(fname)
+            if fc2.button("🗑️", key=f"del_walkin_{fname}"):
+                os.remove(os.path.join(WALKIN_DATA_DIR, fname))
+                st.rerun()
+        if st.button("Hapus semua file walk-in", key="del_all_walkin"):
+            for fname in stored_walkin_files:
+                os.remove(os.path.join(WALKIN_DATA_DIR, fname))
+            st.rerun()
+
+st.sidebar.markdown("---")
 st.sidebar.caption(
     "File yang sudah diupload akan otomatis dipakai lagi setiap kali dashboard dibuka, "
     "sampai diganti/dihapus. Upload ulang dengan nama file sama = update (bukan duplikat)."
@@ -2040,7 +2225,9 @@ sd_gadget = _sd_value(boards["SCOREBOARD OMSET GADGET & AKSESORIS"][0])
 sd_corp = _sd_value(board_corp)
 sd_retail = max(sd_gadget - (sd_corp or 0.0), 0.0) if sd_gadget is not None else None
 
-tab_ringkasan, tab_scoreboard, tab_ads = st.tabs(["📈 Ringkasan", "🏆 Scoreboard", "📣 Iklan (Meta Ads)"])
+tab_ringkasan, tab_scoreboard, tab_ads, tab_walkin = st.tabs(
+    ["📈 Ringkasan", "🏆 Scoreboard", "📣 Iklan (Meta Ads)", "🚶 Walk-in Cabang"]
+)
 
 # --------------------------------------------------------------------------------------
 # TAB 1: Ringkasan
@@ -2366,7 +2553,7 @@ with tab_scoreboard:
         for idx, item in enumerate(action_items):
             prefix = _action_prefix.get(item["level"], "")
             label = f"**{prefix} — {item['title']}**  \n{item['text']}"
-            checked = st.checkbox(label, key=f"todo_v7_{idx}_{item['title']}")
+            checked = st.checkbox(label, key=f"todo_v8_{idx}_{item['title']}")
             if checked:
                 done_count += 1
         st.caption(f"✔️ {done_count} dari {len(action_items)} action item sudah ditandai selesai.")
@@ -2520,4 +2707,110 @@ with tab_ads:
                 st.caption(
                     "Cabang 'LAINNYA' = campaign yang namanya tidak diawali kode/nama cabang "
                     "(mis. campaign umum/brand). Cabang tidak dikenali lainnya akan tetap tampil apa adanya."
+                )
+
+# --------------------------------------------------------------------------------------
+# TAB 4: Walk-in Cabang
+# --------------------------------------------------------------------------------------
+
+with tab_walkin:
+    st.caption(
+        "Upload file **Rincian Pengiriman Pesanan** per cabang lewat sidebar ('🚶 Data Walk-in'). "
+        "**Total Walk-in** dihitung dari jumlah **NOMOR PENGIRIMAN PESANAN yang unik** per bulan "
+        "(bukan jumlah baris) — satu nomor pengiriman bisa muncul beberapa kali kalau order-nya berisi "
+        "beberapa item/barang, jadi dihitung sebagai satu walk-in saja. Tanggal dari kolom **TGL PENGIRIMAN**."
+    )
+
+    if not os.listdir(WALKIN_DATA_DIR):
+        st.info(
+            "Belum ada file walk-in yang diupload. Upload file 'Rincian Pengiriman Pesanan' per cabang "
+            f"lewat sidebar (bisa sampai {MAX_WALKIN_FILES} file) untuk melihat total & rata-rata "
+            "walk-in per bulan per cabang."
+        )
+    else:
+        with st.spinner(f"Memproses {len(os.listdir(WALKIN_DATA_DIR))} file walk-in..."):
+            df_walkin, walkin_errors = load_all_walkin_data(WALKIN_DATA_DIR)
+
+        if walkin_errors:
+            st.warning("Sebagian file dilewati karena formatnya tidak cocok:\n\n" + "\n".join(f"- {e}" for e in walkin_errors))
+
+        if df_walkin.empty:
+            st.warning("Tidak ada data walk-in yang bisa dibaca dari file yang diupload.")
+        else:
+            walkin_branches = order_branches(df_walkin["Cabang"].unique())
+            tahun_walkin_opts = sorted(df_walkin["Tahun"].unique(), reverse=True)
+
+            wf1, wf2, wf3 = st.columns([2, 1, 1.4])
+            with wf1:
+                sel_walkin_cabang = st.multiselect("Cabang", walkin_branches, default=walkin_branches, key="walkin_cabang_filter")
+            with wf2:
+                sel_walkin_tahun = st.multiselect("Tahun", tahun_walkin_opts, default=tahun_walkin_opts, key="walkin_tahun_filter")
+            with wf3:
+                sel_walkin_bulan = st.multiselect(
+                    "Bulan", list(range(1, 13)), default=list(range(1, 13)),
+                    format_func=lambda m: BULAN_ID[m - 1], key="walkin_bulan_filter",
+                )
+
+            f_walkin = df_walkin[
+                df_walkin["Cabang"].isin(sel_walkin_cabang)
+                & df_walkin["Tahun"].isin(sel_walkin_tahun)
+                & df_walkin["Bulan"].isin(sel_walkin_bulan)
+            ]
+
+            if f_walkin.empty:
+                st.warning("Tidak ada data untuk kombinasi filter ini.")
+            else:
+                agg = aggregate_walkin_monthly(f_walkin)
+
+                total_walkin_all = agg["TotalWalkin"].sum()
+                total_hari_all = agg["HariEfektif"].sum()
+                avg_per_day_all = (total_walkin_all / total_hari_all) if total_hari_all else 0.0
+                n_cabang = f_walkin["Cabang"].nunique()
+
+                k1, k2, k3 = st.columns(3)
+                k1.markdown(render_kpi_card_text("Total Walk-in (kombinasi filter)", format_number(total_walkin_all), "#1e3a8a", "#3b82f6", "🚶"), unsafe_allow_html=True)
+                k2.markdown(render_kpi_card_text("Rata-rata Walk-in / Hari", format_decimal(avg_per_day_all), "#0f766e", "#14b8a6", "📅"), unsafe_allow_html=True)
+                k3.markdown(render_kpi_card_text("Jumlah Cabang", format_number(n_cabang), "#6d28d9", "#a78bfa", "🏬"), unsafe_allow_html=True)
+
+                st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+                agg["Periode"] = agg.apply(lambda r: f"{BULAN_ID[int(r['Bulan']) - 1][:3]} {int(r['Tahun'])}", axis=1)
+                agg["urut"] = agg["Tahun"] * 100 + agg["Bulan"]
+                branch_order_walkin = order_branches(agg["Cabang"].unique())
+                agg["Cabang"] = pd.Categorical(agg["Cabang"], categories=branch_order_walkin, ordered=True)
+                agg_sorted = agg.sort_values(["urut", "Cabang"])
+                periode_order = agg_sorted.sort_values("urut")["Periode"].unique().tolist()
+
+                st.subheader("Total Walk-in per Bulan per Cabang")
+                agg_sorted["LabelTotal"] = agg_sorted["TotalWalkin"].apply(format_number)
+                fig_walkin = px.bar(
+                    agg_sorted, x="Cabang", y="TotalWalkin", color="Periode", barmode="group",
+                    text="LabelTotal", category_orders={"Cabang": branch_order_walkin, "Periode": periode_order},
+                )
+                fig_walkin.update_traces(textposition="outside", textfont_size=9, cliponaxis=False)
+                fig_walkin.update_layout(xaxis_title="", yaxis_title="Total Walk-in", legend_title_text="", margin=dict(t=30), height=460)
+                st.plotly_chart(fig_walkin, width="stretch")
+
+                st.subheader("Rata-rata Walk-in per Hari")
+                agg_sorted["LabelAvg"] = agg_sorted["RataRataPerHari"].apply(lambda v: format_decimal(v))
+                fig_avg = px.bar(
+                    agg_sorted, x="Cabang", y="RataRataPerHari", color="Periode", barmode="group",
+                    text="LabelAvg", category_orders={"Cabang": branch_order_walkin, "Periode": periode_order},
+                )
+                fig_avg.update_traces(textposition="outside", textfont_size=9, cliponaxis=False)
+                fig_avg.update_layout(xaxis_title="", yaxis_title="Rata-rata Walk-in / Hari", legend_title_text="", margin=dict(t=30), height=420)
+                st.plotly_chart(fig_avg, width="stretch")
+
+                st.subheader("Tabel Detail per Cabang per Bulan")
+                disp = agg_sorted[["Cabang", "Periode", "TotalWalkin", "HariEfektif", "RataRataPerHari"]].rename(columns={
+                    "TotalWalkin": "Total Walk-in", "HariEfektif": "Hari Efektif", "RataRataPerHari": "Rata-rata / Hari",
+                })
+                disp["Rata-rata / Hari"] = disp["Rata-rata / Hari"].apply(format_decimal)
+                st.dataframe(disp, width="stretch", hide_index=True)
+
+                st.caption(
+                    "**Hari Efektif**: untuk bulan yang sudah lewat penuh, dibagi jumlah hari kalender bulan "
+                    "tsb; untuk bulan paling baru di data (dianggap 'bulan berjalan'), dibagi jumlah hari yang "
+                    "sudah tercatat sampai tanggal terakhir di bulan itu. **Rata-rata Walk-in/Hari** = "
+                    "Total Walk-in ÷ Hari Efektif."
                 )
