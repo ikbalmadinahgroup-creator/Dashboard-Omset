@@ -44,6 +44,8 @@ st.set_page_config(page_title="Dashboard Omset MFlash", layout="wide", page_icon
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 MAIN_DATA_DIR = os.path.join(DATA_DIR, "main")
 os.makedirs(MAIN_DATA_DIR, exist_ok=True)
+ADS_DATA_DIR = os.path.join(DATA_DIR, "ads")
+os.makedirs(ADS_DATA_DIR, exist_ok=True)
 CORPORATE_DATA_PATH = os.path.join(DATA_DIR, "corporate_data.xlsx")
 TARGET_DATA_PATH = os.path.join(DATA_DIR, "target_data.xlsx")
 
@@ -54,6 +56,7 @@ MAIN_SHEET_NAME = "Faktur Penjualan"
 CORE_COLUMNS = ["TGL FAKTUR", "KATEGORI BARANG", "TOTAL HARGA"]
 REQUIRED_COLUMNS = ["CABANG"] + CORE_COLUMNS
 MAX_MAIN_FILES = 50
+MAX_ADS_FILES = 50
 
 BULAN_ID = [
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -130,6 +133,33 @@ def branch_from_filename(filename: str) -> str:
     tokens = [t for t in re.split(r"\s+", name) if t]
     cleaned = [t for t in tokens if t.upper() not in _FILENAME_NOISE_WORDS and not t.isdigit()]
     return cleaned[0].upper() if cleaned else "TIDAK DIKETAHUI"
+
+
+_ADS_BRANCH_OVERRIDES = {
+    "WARUNG BONGKOK": "WARBONG",
+    "WARBONG": "WARBONG",
+}
+
+
+def branch_from_campaign_name(campaign_name: str) -> str:
+    """Tebak cabang dari nama campaign Meta Ads, contoh: '12 Cinere - MATOT !!!' -> CINERE,
+    '10 Warung Bongkok - L - MATOT !!!' -> WARBONG. Campaign tanpa prefix nomor cabang
+    (mis. 'SV - LCD 78K - CTWA') dikelompokkan sebagai 'LAINNYA'."""
+    if not campaign_name:
+        return "LAINNYA"
+    name = str(campaign_name).strip()
+    m = re.match(r"^\s*\d{1,2}\s+(.+?)\s*-", name)
+    if not m:
+        return "LAINNYA"
+    chunk = re.sub(r"\s+", " ", m.group(1)).strip().upper()
+    if chunk in _ADS_BRANCH_OVERRIDES:
+        return _ADS_BRANCH_OVERRIDES[chunk]
+    for b in BRANCH_ORDER:
+        if chunk == b or chunk.startswith(b) or b.startswith(chunk):
+            return b
+    if "WARUNG" in chunk:
+        return "WARBONG"
+    return chunk
 
 
 SERVICE_BARANG_VALUES = {"JASA", "SPAREPART"}
@@ -283,6 +313,207 @@ def load_all_main_data(main_dir: str):
             errors.append(f"{fname}: {e}")
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return combined, errors
+
+
+# --------------------------------------------------------------------------------------
+# Loader data Iklan Meta Ads (export "Campaigns" dari Ads Manager)
+# Fokus: Messaging Conversations Started & Cost per Messaging Conversation Started
+# --------------------------------------------------------------------------------------
+
+_ADS_REQUIRED_COLS = [
+    "CAMPAIGN NAME",
+    "AMOUNT SPENT (IDR)",
+    "MESSAGING CONVERSATIONS STARTED",
+    "COST PER MESSAGING CONVERSATION STARTED (IDR)",
+]
+_ADS_COLUMNS = [
+    "Cabang", "Campaign", "Status", "PeriodeMulai", "PeriodeSelesai", "Spend", "MsgConv",
+    "CostPerMsg", "Results", "Impressions", "LinkClicks", "CTR", "CPM", "SumberFile",
+]
+
+
+def _num_or(v, default=0.0):
+    if v is None or v == "":
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _num_or_none(v):
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def load_ads_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    if header_row is None:
+        raise ValueError("File kosong / tidak ada header.")
+
+    col_idx = {}
+    for i, h in enumerate(header_row):
+        if h is None:
+            continue
+        col_idx[str(h).strip().upper()] = i
+
+    missing = [c for c in _ADS_REQUIRED_COLS if c not in col_idx]
+    if missing:
+        raise ValueError(
+            f"File ini sepertinya bukan export 'Campaigns' dari Meta Ads Manager (kolom {', '.join(missing)} "
+            f"tidak ditemukan). Export dari Ads Manager > pilih kolom Messaging Conversation, lalu Export > Excel."
+        )
+
+    def g(row, name):
+        idx = col_idx.get(name)
+        if idx is None or idx >= len(row):
+            return None
+        return row[idx]
+
+    rows = []
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
+        campaign = g(row, "CAMPAIGN NAME")
+        if not campaign or str(campaign).strip() == "":
+            continue
+        rows.append(
+            {
+                "Cabang": branch_from_campaign_name(campaign),
+                "Campaign": str(campaign).strip(),
+                "Status": str(g(row, "CAMPAIGN DELIVERY") or "-").strip().title(),
+                "PeriodeMulai": to_date(g(row, "REPORTING STARTS")),
+                "PeriodeSelesai": to_date(g(row, "REPORTING ENDS")),
+                "Spend": _num_or(g(row, "AMOUNT SPENT (IDR)")),
+                "MsgConv": _num_or(g(row, "MESSAGING CONVERSATIONS STARTED")),
+                "CostPerMsg": _num_or_none(g(row, "COST PER MESSAGING CONVERSATION STARTED (IDR)")),
+                "Results": _num_or_none(g(row, "RESULTS")),
+                "Impressions": _num_or(g(row, "IMPRESSIONS")),
+                "LinkClicks": _num_or(g(row, "LINK CLICKS")),
+                "CTR": _num_or_none(g(row, "CTR (LINK CLICK-THROUGH RATE)")),
+                "CPM": _num_or_none(g(row, "CPM (COST PER 1,000 IMPRESSIONS) (IDR)")),
+                "SumberFile": filename_hint,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=_ADS_COLUMNS)
+
+
+def load_all_ads_data(ads_dir: str):
+    files = sorted(f for f in os.listdir(ads_dir) if f.lower().endswith(".xlsx"))
+    frames, errors = [], []
+    for fname in files:
+        fpath = os.path.join(ads_dir, fname)
+        try:
+            with open(fpath, "rb") as f:
+                file_bytes = f.read()
+            df = load_ads_data(file_bytes, filename_hint=fname)
+            if not df.empty:
+                frames.append(df)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{fname}: {e}")
+    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_ADS_COLUMNS)
+    return combined, errors
+
+
+def aggregate_ads_by_branch(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["Cabang", "Spend", "MsgConv", "CostPerMsg", "Impressions", "LinkClicks", "CTR", "CPM", "JumlahCampaign"])
+    g = df.groupby("Cabang").agg(
+        Spend=("Spend", "sum"),
+        MsgConv=("MsgConv", "sum"),
+        Impressions=("Impressions", "sum"),
+        LinkClicks=("LinkClicks", "sum"),
+        JumlahCampaign=("Campaign", "nunique"),
+    ).reset_index()
+    g["CostPerMsg"] = g.apply(lambda r: (r["Spend"] / r["MsgConv"]) if r["MsgConv"] else None, axis=1)
+    g["CTR"] = g.apply(lambda r: (r["LinkClicks"] / r["Impressions"]) if r["Impressions"] else None, axis=1)
+    g["CPM"] = g.apply(lambda r: (r["Spend"] / r["Impressions"] * 1000) if r["Impressions"] else None, axis=1)
+    return g.sort_values(by="CostPerMsg", na_position="last")
+
+
+def generate_ads_insights(df: pd.DataFrame):
+    """Rekomendasi otomatis berbasis data: bandingkan tiap campaign terhadap rata-rata
+    tertimbang Cost per Messaging Conversation, dan tandai campaign yang boros tanpa hasil."""
+    insights = []
+    if df.empty:
+        return insights, 0.0, 0.0, None
+
+    total_spend = df["Spend"].sum()
+    total_msg = df["MsgConv"].sum()
+    avg_cost = (total_spend / total_msg) if total_msg else None
+
+    # 1) Spend signifikan tapi 0 Messaging Conversation -> boros, evaluasi/pause
+    zero_conv = df[(df["Spend"] >= 5000) & (df["MsgConv"] == 0)].sort_values("Spend", ascending=False)
+    for _, r in zero_conv.iterrows():
+        insights.append({
+            "level": "bad", "title": f"{r['Campaign']} ({r['Cabang']})",
+            "text": f"Sudah menghabiskan {format_rupiah(r['Spend'])} tapi belum menghasilkan Messaging "
+                    f"Conversation sama sekali. Evaluasi ulang audience/creative, atau pause campaign ini "
+                    f"supaya budget tidak terus terbuang.",
+        })
+
+    if avg_cost:
+        # 2) Cost per messaging jauh di atas rata-rata -> mahal
+        high = df[(df["MsgConv"] > 0) & (df["CostPerMsg"] > avg_cost * 1.5)].sort_values("CostPerMsg", ascending=False)
+        for _, r in high.iterrows():
+            ratio = r["CostPerMsg"] / avg_cost
+            insights.append({
+                "level": "warn", "title": f"{r['Campaign']} ({r['Cabang']})",
+                "text": f"Cost per Messaging Conversation {format_rupiah(r['CostPerMsg'])} — {ratio:.1f}x lebih "
+                        f"mahal dari rata-rata semua campaign ({format_rupiah(avg_cost)}). Coba ganti creative/"
+                        f"copy, sempitkan targeting, atau turunkan budget harian.",
+            })
+
+        # 3) Cost per messaging jauh di bawah rata-rata dengan volume cukup -> efisien, scale up
+        low = df[(df["MsgConv"] >= 3) & (df["CostPerMsg"] < avg_cost * 0.7)].sort_values("CostPerMsg")
+        for _, r in low.iterrows():
+            insights.append({
+                "level": "good", "title": f"{r['Campaign']} ({r['Cabang']})",
+                "text": f"Paling efisien: Cost per Messaging Conversation hanya {format_rupiah(r['CostPerMsg'])} "
+                        f"dari {int(r['MsgConv'])} conversation. Kandidat kuat untuk dinaikkan budgetnya (scale up).",
+            })
+
+    # 4) Campaign berstatus Inactive tapi masih tercatat ada spend kecil -> pastikan benar-benar berhenti
+    ghost = df[(df["Status"].str.lower() == "inactive") & (df["Spend"] > 0) & (df["Spend"] < 1000)]
+    for _, r in ghost.iterrows():
+        insights.append({
+            "level": "warn", "title": f"{r['Campaign']} ({r['Cabang']})",
+            "text": f"Status sudah Inactive tapi masih tercatat sisa spend {format_rupiah(r['Spend'])}. "
+                    f"Cek ulang di Ads Manager untuk memastikan campaign benar-benar berhenti menarik budget.",
+        })
+
+    return insights, total_spend, total_msg, avg_cost
+
+
+def render_insight_card(title: str, text: str, level: str) -> str:
+    styles = {
+        "bad": ("#fee2e2", "#991b1b", "🚨"),
+        "warn": ("#fef9c3", "#854d0e", "⚠️"),
+        "good": ("#dcfce7", "#166534", "✅"),
+    }
+    bg, fg, icon = styles.get(level, ("#f3f4f6", "#111827", "ℹ️"))
+    return (
+        f'<div style="background:{bg};color:{fg};border-radius:10px;padding:10px 14px;margin-bottom:8px;">'
+        f'<b>{icon} {title}</b><br><span style="font-size:13px;">{text}</span></div>'
+    )
+
+
+def render_kpi_card_text(label: str, value_text: str, color1: str, color2: str, icon: str) -> str:
+    return f"""
+    <div style="background:linear-gradient(135deg,{color1},{color2});border-radius:14px;
+                padding:16px 18px;color:white;box-shadow:0 2px 8px rgba(0,0,0,.12);height:100%;">
+      <div style="font-size:26px;line-height:1;">{icon}</div>
+      <div style="font-size:13px;opacity:.9;margin-top:8px;">{label}</div>
+      <div style="font-size:22px;font-weight:700;margin-top:2px;">{value_text}</div>
+    </div>
+    """
 
 
 # --------------------------------------------------------------------------------------
@@ -1158,6 +1389,52 @@ st.sidebar.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
+st.sidebar.markdown("---")
+st.sidebar.title("📣 Data Iklan Meta Ads")
+st.sidebar.caption(
+    "Upload hasil export 'Campaigns' dari Meta Ads Manager (Export > Excel). Bisa upload beberapa "
+    "file sekaligus (mis. per periode), sampai 50 file. Dipakai di tab 'Iklan (Meta Ads)'."
+)
+ads_uploads = st.sidebar.file_uploader(
+    "Upload file export Meta Ads", type=["xlsx"], accept_multiple_files=True, key="ads_uploads"
+)
+if ads_uploads:
+    existing_ads = len(os.listdir(ADS_DATA_DIR))
+    if existing_ads + len(ads_uploads) > MAX_ADS_FILES:
+        st.sidebar.error(
+            f"Maksimal {MAX_ADS_FILES} file. Saat ini sudah ada {existing_ads} file tersimpan, "
+            f"hapus beberapa dulu di bawah sebelum upload {len(ads_uploads)} file baru."
+        )
+    else:
+        saved, failed = 0, []
+        for uf in ads_uploads:
+            safe_name = sanitize_filename(uf.name)
+            try:
+                with open(os.path.join(ADS_DATA_DIR, safe_name), "wb") as f:
+                    f.write(uf.getbuffer())
+                saved += 1
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{uf.name}: {e}")
+        if saved:
+            st.sidebar.success(f"{saved} file iklan tersimpan.")
+        if failed:
+            st.sidebar.error("Gagal menyimpan:\n" + "\n".join(failed))
+
+stored_ads_files = sorted(os.listdir(ADS_DATA_DIR))
+if stored_ads_files:
+    with st.sidebar.expander(f"📁 File iklan tersimpan ({len(stored_ads_files)}/{MAX_ADS_FILES})"):
+        for fname in stored_ads_files:
+            fc1, fc2 = st.columns([4, 1])
+            fc1.write(fname)
+            if fc2.button("🗑️", key=f"del_ads_{fname}"):
+                os.remove(os.path.join(ADS_DATA_DIR, fname))
+                st.rerun()
+        if st.button("Hapus semua file iklan", key="del_all_ads"):
+            for fname in stored_ads_files:
+                os.remove(os.path.join(ADS_DATA_DIR, fname))
+            st.rerun()
+
+st.sidebar.markdown("---")
 st.sidebar.caption(
     "File yang sudah diupload akan otomatis dipakai lagi setiap kali dashboard dibuka, "
     "sampai diganti/dihapus. Upload ulang dengan nama file sama = update (bukan duplikat)."
@@ -1291,7 +1568,7 @@ pct_service, ratio_service = _pct_and_target_ratio(boards["SCOREBOARD OMSET SERV
 pct_gadget, ratio_gadget = _pct_and_target_ratio(boards["SCOREBOARD OMSET GADGET & AKSESORIS"][0])
 pct_corp, ratio_corp = _pct_and_target_ratio(board_corp)
 
-tab_ringkasan, tab_scoreboard = st.tabs(["📈 Ringkasan", "🏆 Scoreboard"])
+tab_ringkasan, tab_scoreboard, tab_ads = st.tabs(["📈 Ringkasan", "🏆 Scoreboard", "📣 Iklan (Meta Ads)"])
 
 # --------------------------------------------------------------------------------------
 # TAB 1: Ringkasan
@@ -1477,3 +1754,147 @@ with tab_scoreboard:
         "**Cara baca warna:** hijau = sudah di atas ekspektasi / target tercapai, "
         "kuning = mendekati (80-100% dari ekspektasi), merah = di bawah ekspektasi / masih ada gap."
     )
+
+# --------------------------------------------------------------------------------------
+# TAB 3: Iklan (Meta Ads)
+# --------------------------------------------------------------------------------------
+
+with tab_ads:
+    st.caption(
+        "Upload hasil export **Campaigns** dari Meta Ads Manager (Export > Excel) lewat sidebar. "
+        "Fokus di sini: **Messaging Conversations Started** & **Cost per Messaging Conversation Started**, "
+        "plus rekomendasi otomatis berdasarkan performa tiap campaign."
+    )
+
+    if not os.listdir(ADS_DATA_DIR):
+        st.info(
+            "Belum ada file iklan yang diupload. Upload file export Campaigns dari Meta Ads Manager "
+            "lewat sidebar ('📣 Data Iklan Meta Ads') untuk melihat performa Messaging Conversation "
+            "per cabang beserta rekomendasi improvement-nya."
+        )
+    else:
+        with st.spinner(f"Memproses {len(os.listdir(ADS_DATA_DIR))} file iklan..."):
+            df_ads, ads_errors = load_all_ads_data(ADS_DATA_DIR)
+
+        if ads_errors:
+            st.warning("Sebagian file dilewati karena formatnya tidak cocok:\n\n" + "\n".join(f"- {e}" for e in ads_errors))
+
+        if df_ads.empty:
+            st.warning("Tidak ada data campaign yang bisa dibaca dari file yang diupload.")
+        else:
+            ads_branches = order_branches([b for b in df_ads["Cabang"].unique() if b != "LAINNYA"])
+            if "LAINNYA" in df_ads["Cabang"].unique():
+                ads_branches = ads_branches + ["LAINNYA"]
+            ads_status_options = sorted(df_ads["Status"].unique())
+
+            fa1, fa2 = st.columns([2, 1])
+            with fa1:
+                sel_ads_branch = st.multiselect("Cabang", ads_branches, default=ads_branches, key="ads_branch_filter")
+            with fa2:
+                sel_ads_status = st.multiselect("Status Campaign", ads_status_options, default=ads_status_options, key="ads_status_filter")
+
+            f_ads = df_ads[df_ads["Cabang"].isin(sel_ads_branch) & df_ads["Status"].isin(sel_ads_status)]
+
+            if f_ads.empty:
+                st.warning("Tidak ada campaign untuk kombinasi filter ini.")
+            else:
+                total_spend = f_ads["Spend"].sum()
+                total_msg = f_ads["MsgConv"].sum()
+                avg_cost = (total_spend / total_msg) if total_msg else None
+                active_n = f_ads.loc[f_ads["Status"].str.lower() == "active", "Campaign"].nunique()
+
+                a1, a2, a3, a4 = st.columns(4)
+                a1.markdown(render_kpi_card_text("Total Spend", format_rupiah(total_spend), "#1e3a8a", "#3b82f6", "💰"), unsafe_allow_html=True)
+                a2.markdown(render_kpi_card_text("Messaging Conversations", format_number(total_msg), "#0f766e", "#14b8a6", "💬"), unsafe_allow_html=True)
+                a3.markdown(render_kpi_card_text("Rata-rata Cost / Messaging", format_rupiah(avg_cost) if avg_cost else "-", "#b45309", "#f59e0b", "📉"), unsafe_allow_html=True)
+                a4.markdown(render_kpi_card_text("Campaign Aktif", format_number(active_n), "#6d28d9", "#a78bfa", "🚀"), unsafe_allow_html=True)
+
+                st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+                st.subheader("Performa per Cabang")
+
+                branch_agg = aggregate_ads_by_branch(f_ads)
+                branch_agg_display = branch_agg.copy()
+                branch_agg_display["Cabang"] = pd.Categorical(
+                    branch_agg_display["Cabang"], categories=order_branches(branch_agg_display["Cabang"]) if "LAINNYA" not in branch_agg_display["Cabang"].values else order_branches([b for b in branch_agg_display["Cabang"] if b != "LAINNYA"]) + ["LAINNYA"],
+                    ordered=True,
+                )
+                branch_agg_display = branch_agg_display.sort_values("Cabang")
+
+                gcol1, gcol2 = st.columns(2)
+                with gcol1:
+                    fig_cost = px.bar(
+                        branch_agg.sort_values("CostPerMsg"), x="Cabang", y="CostPerMsg",
+                        color="CostPerMsg", color_continuous_scale="RdYlGn_r",
+                        title="Cost per Messaging Conversation per Cabang (makin rendah makin baik)",
+                    )
+                    fig_cost.update_layout(xaxis_title="", yaxis_title="Cost per Messaging (Rp)", coloraxis_showscale=False)
+                    st.plotly_chart(fig_cost, width="stretch")
+                with gcol2:
+                    fig_msg = px.bar(
+                        branch_agg.sort_values("MsgConv", ascending=False), x="Cabang", y="MsgConv",
+                        color="MsgConv", color_continuous_scale="Greens",
+                        title="Jumlah Messaging Conversation per Cabang",
+                    )
+                    fig_msg.update_layout(xaxis_title="", yaxis_title="Messaging Conversations", coloraxis_showscale=False)
+                    st.plotly_chart(fig_msg, width="stretch")
+
+                branch_table = branch_agg_display.rename(columns={
+                    "Spend": "Spend (Rp)", "MsgConv": "Messaging Conversation", "CostPerMsg": "Cost per Messaging (Rp)",
+                    "Impressions": "Impressions", "LinkClicks": "Link Clicks", "CTR": "CTR", "CPM": "CPM (Rp)",
+                    "JumlahCampaign": "Jumlah Campaign",
+                })[["Cabang", "Jumlah Campaign", "Spend (Rp)", "Messaging Conversation", "Cost per Messaging (Rp)", "CTR", "CPM (Rp)", "Impressions", "Link Clicks"]]
+                try:
+                    sty = (
+                        branch_table.style
+                        .background_gradient(cmap="RdYlGn_r", subset=["Cost per Messaging (Rp)"])
+                        .background_gradient(cmap="Greens", subset=["Messaging Conversation"])
+                        .format({
+                            "Spend (Rp)": format_rupiah, "Cost per Messaging (Rp)": lambda v: format_rupiah(v) if pd.notna(v) else "-",
+                            "CPM (Rp)": lambda v: format_rupiah(v) if pd.notna(v) else "-",
+                            "CTR": lambda v: format_percent(v) if pd.notna(v) else "-",
+                            "Impressions": format_number, "Link Clicks": format_number, "Messaging Conversation": format_number,
+                        })
+                    )
+                    st.dataframe(sty, width="stretch", hide_index=True)
+                except ImportError:
+                    disp = branch_table.copy()
+                    disp["Spend (Rp)"] = disp["Spend (Rp)"].apply(format_rupiah)
+                    disp["Cost per Messaging (Rp)"] = disp["Cost per Messaging (Rp)"].apply(lambda v: format_rupiah(v) if pd.notna(v) else "-")
+                    st.dataframe(disp, width="stretch", hide_index=True)
+
+                st.subheader("Detail per Campaign")
+                detail = f_ads.sort_values("CostPerMsg", na_position="last")[
+                    ["Cabang", "Campaign", "Status", "Spend", "MsgConv", "CostPerMsg", "CTR", "CPM", "Impressions", "LinkClicks"]
+                ].rename(columns={
+                    "Spend": "Spend (Rp)", "MsgConv": "Messaging Conversation", "CostPerMsg": "Cost per Messaging (Rp)",
+                    "CPM": "CPM (Rp)", "LinkClicks": "Link Clicks",
+                })
+                disp_detail = detail.copy()
+                disp_detail["Spend (Rp)"] = disp_detail["Spend (Rp)"].apply(format_rupiah)
+                disp_detail["Cost per Messaging (Rp)"] = disp_detail["Cost per Messaging (Rp)"].apply(lambda v: format_rupiah(v) if pd.notna(v) else "-")
+                disp_detail["CPM (Rp)"] = disp_detail["CPM (Rp)"].apply(lambda v: format_rupiah(v) if pd.notna(v) else "-")
+                disp_detail["CTR"] = disp_detail["CTR"].apply(lambda v: format_percent(v) if pd.notna(v) else "-")
+                disp_detail["Impressions"] = disp_detail["Impressions"].apply(format_number)
+                disp_detail["Link Clicks"] = disp_detail["Link Clicks"].apply(format_number)
+                disp_detail["Messaging Conversation"] = disp_detail["Messaging Conversation"].apply(format_number)
+                st.dataframe(disp_detail, width="stretch", hide_index=True)
+
+                st.markdown("---")
+                st.subheader("💡 Insight & Rekomendasi Improvement")
+                st.caption(
+                    "Dihitung otomatis dari data yang diupload: dibandingkan terhadap rata-rata Cost per "
+                    "Messaging Conversation tertimbang semua campaign yang tampil di filter ini."
+                )
+                insights, _, _, _ = generate_ads_insights(f_ads)
+                if not insights:
+                    st.success("Performa semua campaign relatif merata, tidak ada anomali signifikan yang terdeteksi.")
+                else:
+                    order = {"bad": 0, "warn": 1, "good": 2}
+                    insights_sorted = sorted(insights, key=lambda i: order.get(i["level"], 9))
+                    html = "".join(render_insight_card(i["title"], i["text"], i["level"]) for i in insights_sorted)
+                    st.markdown(html, unsafe_allow_html=True)
+
+                st.caption(
+                    "Cabang 'LAINNYA' = campaign yang namanya tidak diawali kode/nama cabang "
+                    "(mis. campaign umum/brand). Cabang tidak dikenali lainnya akan tetap tampil apa adanya."
+                )

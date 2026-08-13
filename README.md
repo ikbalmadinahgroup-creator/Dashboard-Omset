@@ -58,6 +58,28 @@ untuk melihat posisi di tanggal lain.
 **Cara baca warna:** hijau = sudah di atas ekspektasi/target tercapai, kuning = mendekati
 (80-100% dari ekspektasi), merah = di bawah ekspektasi/masih ada gap.
 
+## Tab Iklan (Meta Ads)
+
+Upload file export **Campaigns** dari Meta Ads Manager (Ads Manager > Export > Excel) lewat sidebar
+("📣 Data Iklan Meta Ads" — bisa banyak file sekaligus, sampai 50 file, mis. per periode). Cabang
+ditebak otomatis dari nama campaign (contoh: `12 Cinere - MATOT !!!` → CINERE, `10 Warung Bongkok -
+L - MATOT !!!` → WARBONG). Campaign yang namanya tidak diawali kode cabang (mis. campaign umum/brand)
+dikelompokkan sebagai **LAINNYA**.
+
+Isi tab ini:
+
+- KPI: Total Spend, total Messaging Conversations Started, rata-rata Cost per Messaging Conversation
+  (tertimbang total spend ÷ total messaging conversation), jumlah campaign berstatus Active.
+- Grafik Cost per Messaging Conversation dan jumlah Messaging Conversation per cabang.
+- Tabel performa per cabang & detail per campaign, diurutkan dari Cost per Messaging paling efisien.
+- **Insight & Rekomendasi** otomatis, dihitung dari data yang diupload (bukan opini manual):
+  - 🚨 Campaign yang sudah spend signifikan tapi 0 Messaging Conversation → disarankan evaluasi/pause.
+  - ⚠️ Campaign dengan Cost per Messaging > 1,5x rata-rata semua campaign → disarankan ganti
+    creative/audience atau turunkan budget.
+  - ✅ Campaign dengan Cost per Messaging < 0,7x rata-rata (dan volume cukup) → kandidat scale up budget.
+  - ⚠️ Campaign berstatus Inactive tapi masih tercatat sisa spend kecil → disarankan cek ulang di
+    Ads Manager untuk memastikan benar-benar berhenti.
+
 ## Aturan perhitungan (penting)
 
 - **Omset Service** = jumlah baris transaksi dengan kolom `KATEGORI BARANG` = "Jasa" atau "Sparepart".
