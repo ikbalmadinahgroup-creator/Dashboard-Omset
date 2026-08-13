@@ -1,20 +1,19 @@
 """
 Dashboard Omset MFlash
 =======================
-Streamlit dashboard menampilkan:
+Menampilkan omset untuk 3 kategori:
   1. Omset All
   2. Omset Service
   3. Omset Gadget & Aksesoris
-  4. Omset Marketing Corporate
+(+ Omset Marketing Corporate di tab Ringkasan, kalau datanya diupload)
 
-Filter: Tahun, Bulan, Cabang
-Data diisi lewat tombol upload file Excel (tidak perlu edit source code / repo GitHub).
+Ada 2 tampilan:
+  - Tab "Ringkasan": total omset & tren, bisa difilter Tahun / Bulan / Cabang.
+  - Tab "Scoreboard": tabel per cabang gaya scoreboard (Target / Expected Value /
+    Pencapaian / Gap / Kejar Target Per Hari / rata-rata omset bulan lalu vs bulan ini),
+    dihitung dari Target yang diupload + tanggal acuan ("hari ini").
 
-Sumber data:
-  - Sheet "Faktur Penjualan" pada file utama -> Omset All, Omset Service, Omset Gadget & Aksesoris
-    (dihitung dari kolom CABANG, TGL FAKTUR, KATEGORI PENJUALAN, TOTAL HARGA)
-  - File terpisah "Data Marketing Corporate" (template disediakan di sidebar) -> Omset Marketing Corporate
-    (kolom: Tahun, Bulan, Cabang, Omset)
+Semua data diisi lewat tombol upload (tidak perlu edit source code / repo GitHub).
 
 Jalankan dengan:
     streamlit run app.py
@@ -23,7 +22,7 @@ Jalankan dengan:
 import io
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import openpyxl
 import pandas as pd
@@ -40,9 +39,13 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 MAIN_DATA_DIR = os.path.join(DATA_DIR, "main")
 os.makedirs(MAIN_DATA_DIR, exist_ok=True)
 CORPORATE_DATA_PATH = os.path.join(DATA_DIR, "corporate_data.xlsx")
+TARGET_DATA_PATH = os.path.join(DATA_DIR, "target_data.xlsx")
 
 MAIN_SHEET_NAME = "Faktur Penjualan"
-CORE_COLUMNS = ["TGL FAKTUR", "KATEGORI PENJUALAN", "TOTAL HARGA"]
+# Kolom wajib untuk hitung Omset Service vs Gadget & Aksesoris:
+#   - Omset Service = baris dengan KATEGORI BARANG "Jasa" atau "Sparepart"
+#   - Omset Gadget & Aksesoris = Omset All - Omset Service (semua baris lainnya)
+CORE_COLUMNS = ["TGL FAKTUR", "KATEGORI BARANG", "TOTAL HARGA"]
 REQUIRED_COLUMNS = ["CABANG"] + CORE_COLUMNS
 MAX_MAIN_FILES = 50
 
@@ -51,18 +54,37 @@ BULAN_ID = [
     "Juli", "Agustus", "September", "Oktober", "November", "Desember",
 ]
 BULAN_MAP = {name.lower(): i + 1 for i, name in enumerate(BULAN_ID)}
-# beberapa alias singkatan umum
 BULAN_ALIAS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mei": 5, "jun": 6,
     "jul": 7, "agu": 8, "aug": 8, "sep": 9, "okt": 10, "oct": 10,
     "nov": 11, "des": 12, "dec": 12,
 }
 
+KATEGORI_TABS = ["Omset All", "Omset Service", "Omset Gadget & Aksesoris"]
 
-def format_rupiah(value: float) -> str:
-    if value is None or pd.isna(value):
+
+# --------------------------------------------------------------------------------------
+# Helper umum
+# --------------------------------------------------------------------------------------
+
+def format_rupiah(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
         value = 0
     return "Rp " + f"{value:,.0f}".replace(",", ".")
+
+
+def format_number(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    return f"{value:,.0f}".replace(",", ".")
+
+
+def format_percent(value) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "-"
+    s = f"{value * 100:,.2f}"
+    s = s.replace(",", "§").replace(".", ",").replace("§", ".")
+    return s + "%"
 
 
 def sanitize_filename(name: str) -> str:
@@ -91,19 +113,19 @@ def branch_from_filename(filename: str) -> str:
     return cleaned[0].upper() if cleaned else "TIDAK DIKETAHUI"
 
 
-def classify_kategori(kategori: str) -> str:
-    """Kelompokkan KATEGORI PENJUALAN menjadi Service / Gadget & Aksesoris / Lainnya."""
-    if not kategori:
-        return "Lainnya"
-    k = str(kategori).strip().upper()
-    if k.startswith("SERVICE"):
+SERVICE_BARANG_VALUES = {"JASA", "SPAREPART"}
+
+
+def classify_kategori(kategori_barang: str) -> str:
+    """Kelompokkan baris transaksi berdasarkan KATEGORI BARANG:
+    - Omset Service = baris dengan KATEGORI BARANG "Jasa" atau "Sparepart"
+    - Omset Gadget & Aksesoris = semua baris lainnya (Omset All dikurangi Omset Service)"""
+    if kategori_barang and str(kategori_barang).strip().upper() in SERVICE_BARANG_VALUES:
         return "Service"
-    if k.startswith("PENJUALAN"):
-        return "Gadget & Aksesoris"
-    return "Lainnya"
+    return "Gadget & Aksesoris"
 
 
-def parse_bulan(value) -> int | None:
+def parse_bulan(value):
     """Terima nama bulan (Indonesia), singkatan, atau angka 1-12."""
     if value is None:
         return None
@@ -122,12 +144,25 @@ def parse_bulan(value) -> int | None:
         return None
 
 
+def to_date(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return pd.to_datetime(value).date()
+    except (ValueError, TypeError):
+        return None
+
+
 # --------------------------------------------------------------------------------------
-# Loader data utama (Faktur Penjualan) - streaming read_only agar cepat & hemat memori
+# Loader data utama (transaksi per cabang) - streaming read_only agar cepat & hemat memori
 # --------------------------------------------------------------------------------------
 
 def _find_data_sheet(wb):
-    """Cari sheet yang punya kolom TGL FAKTUR, KATEGORI PENJUALAN, TOTAL HARGA.
+    """Cari sheet yang punya kolom TGL FAKTUR, KATEGORI BARANG, TOTAL HARGA.
     Diprioritaskan sheet bernama 'Faktur Penjualan', lalu sheet lain yang cocok
     (berguna untuk file per-cabang yang mungkin punya nama sheet berbeda)."""
     candidates = sorted(
@@ -174,10 +209,10 @@ def load_main_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
             cabang = fallback_branch
 
         tgl = row[col_idx["TGL FAKTUR"]]
-        kategori = row[col_idx["KATEGORI PENJUALAN"]]
+        barang = row[col_idx["KATEGORI BARANG"]]
         total = row[col_idx["TOTAL HARGA"]]
 
-        if tgl is None and kategori is None and total is None:
+        if tgl is None and barang is None and total is None:
             empty_streak += 1
             if empty_streak > 3000:
                 break
@@ -196,10 +231,10 @@ def load_main_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
         rows.append(
             {
                 "Cabang": str(cabang).strip().upper(),
-                "Tanggal": tgl,
+                "Tanggal": pd.Timestamp(tgl.date()),
                 "Tahun": tgl.year,
                 "Bulan": tgl.month,
-                "Kategori": str(kategori).strip().upper() if kategori else "LAINNYA",
+                "KategoriBarang": str(barang).strip().upper() if barang else "",
                 "Omset": total,
                 "SumberFile": filename_hint,
             }
@@ -208,11 +243,11 @@ def load_main_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    df["Kelompok"] = df["Kategori"].apply(classify_kategori)
+    df["Kelompok"] = df["KategoriBarang"].apply(classify_kategori)
     return df
 
 
-def load_all_main_data(main_dir: str) -> tuple[pd.DataFrame, list[str]]:
+def load_all_main_data(main_dir: str):
     """Baca semua file .xlsx di folder main_dir (satu file = biasanya satu cabang) dan gabungkan."""
     files = sorted(f for f in os.listdir(main_dir) if f.lower().endswith(".xlsx"))
     frames = []
@@ -225,11 +260,15 @@ def load_all_main_data(main_dir: str) -> tuple[pd.DataFrame, list[str]]:
             df = load_main_data(file_bytes, filename_hint=fname)
             if not df.empty:
                 frames.append(df)
-        except ValueError as e:
+        except Exception as e:  # noqa: BLE001 - tampilkan apa adanya, jangan hentikan file lain
             errors.append(f"{fname}: {e}")
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return combined, errors
 
+
+# --------------------------------------------------------------------------------------
+# Loader data Marketing Corporate (Tahun, Bulan, Cabang, Omset)
+# --------------------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
 def load_corporate_data(file_bytes: bytes) -> pd.DataFrame:
@@ -267,24 +306,21 @@ def make_corporate_template() -> bytes:
     ws = wb.active
     ws.title = "Data Marketing Corporate"
     ws.append(["Tahun", "Bulan", "Cabang", "Omset"])
-    contoh = [
+    for r in [
         [2026, "Januari", "KLENDER", 50000000],
         [2026, "Januari", "RADJIMAN", 12000000],
         [2026, "Februari", "KLENDER", 43000000],
-    ]
-    for r in contoh:
+    ]:
         ws.append(r)
-    ws.column_dimensions["A"].width = 10
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 16
-    ws.column_dimensions["D"].width = 16
+    for col, w in zip("ABCD", [10, 14, 16, 16]):
+        ws.column_dimensions[col].width = w
 
     info = wb.create_sheet("Petunjuk")
     info.append(["Petunjuk pengisian Data Marketing Corporate"])
     info.append([""])
     info.append(["- Tahun: angka 4 digit, contoh 2026"])
     info.append(["- Bulan: nama bulan dalam Bahasa Indonesia, contoh Januari, Februari, ... Desember"])
-    info.append(["- Cabang: nama cabang, harus konsisten dengan nama cabang di data utama (Faktur Penjualan)"])
+    info.append(["- Cabang: nama cabang, harus konsisten dengan nama cabang di data utama"])
     info.append(["- Omset: angka total omset marketing corporate untuk cabang & bulan tersebut"])
     info.append(["- Satu baris = satu kombinasi Tahun + Bulan + Cabang"])
 
@@ -294,20 +330,246 @@ def make_corporate_template() -> bytes:
 
 
 # --------------------------------------------------------------------------------------
+# Loader data Target (untuk tab Scoreboard)
+# --------------------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def load_target_data(file_bytes: bytes) -> pd.DataFrame:
+    xls = pd.ExcelFile(io.BytesIO(file_bytes))
+    sheet_name = xls.sheet_names[0]
+    for name in xls.sheet_names:
+        if "target" in name.lower():
+            sheet_name = name
+            break
+
+    raw = pd.read_excel(xls, sheet_name=sheet_name)
+    raw.columns = [str(c).strip().upper() for c in raw.columns]
+
+    required = ["CABANG", "PERIODE MULAI", "PERIODE SELESAI", "TARGET SERVICE", "TARGET GADGET & AKSESORIS"]
+    missing = [c for c in required if c not in raw.columns]
+    if missing:
+        raise ValueError(
+            f"Kolom berikut tidak ditemukan di file Target: {', '.join(missing)}. "
+            f"Gunakan template yang tersedia di sidebar."
+        )
+
+    df = raw[required].copy()
+    df = df.dropna(subset=["CABANG", "PERIODE MULAI", "PERIODE SELESAI"])
+    df["Cabang"] = df["CABANG"].astype(str).str.strip().str.upper()
+    df["PeriodeMulai"] = df["PERIODE MULAI"].apply(to_date)
+    df["PeriodeSelesai"] = df["PERIODE SELESAI"].apply(to_date)
+    df["TargetService"] = pd.to_numeric(df["TARGET SERVICE"], errors="coerce").fillna(0)
+    df["TargetGadget"] = pd.to_numeric(df["TARGET GADGET & AKSESORIS"], errors="coerce").fillna(0)
+    df["TargetAll"] = df["TargetService"] + df["TargetGadget"]
+    df = df.dropna(subset=["PeriodeMulai", "PeriodeSelesai"])
+    return df[["Cabang", "PeriodeMulai", "PeriodeSelesai", "TargetService", "TargetGadget", "TargetAll"]]
+
+
+def make_target_template() -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data Target"
+    ws.append(["Cabang", "Periode Mulai", "Periode Selesai", "Target Service", "Target Gadget & Aksesoris"])
+    today = date.today()
+    for r in [
+        ["KLENDER", today.replace(day=1), today.replace(day=1) + timedelta(days=91), 988358000, 515642000],
+        ["RADJIMAN", today.replace(day=1), today.replace(day=1) + timedelta(days=91), 303000000, 655642350],
+    ]:
+        ws.append(r)
+    for cell_row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=2, max_col=3):
+        for cell in cell_row:
+            cell.number_format = "DD/MM/YYYY"
+    for col, w in zip("ABCDE", [16, 16, 16, 16, 22]):
+        ws.column_dimensions[col].width = w
+
+    info = wb.create_sheet("Petunjuk")
+    info.append(["Petunjuk pengisian Data Target"])
+    info.append([""])
+    info.append(["- Cabang: nama cabang, harus konsisten dengan nama cabang di data utama"])
+    info.append(["- Periode Mulai / Periode Selesai: tanggal mulai & selesai periode target berjalan"])
+    info.append(["  (mis. target 3 bulan berjalan -> Periode Mulai = awal periode, Periode Selesai = akhir periode)"])
+    info.append(["- Target Service: target omset Service untuk cabang tsb selama periode itu"])
+    info.append(["- Target Gadget & Aksesoris: target omset Gadget & Aksesoris untuk cabang tsb selama periode itu"])
+    info.append(["- Target Omset All dihitung otomatis = Target Service + Target Gadget & Aksesoris"])
+    info.append(["- Kalau target berganti tiap periode, tambahkan baris baru untuk periode berikutnya"])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# --------------------------------------------------------------------------------------
+# Perhitungan Scoreboard
+# --------------------------------------------------------------------------------------
+
+def build_scoreboard(df_kategori: pd.DataFrame, df_target: pd.DataFrame, target_col: str,
+                      branches: list, tanggal_acuan: date) -> pd.DataFrame:
+    """df_kategori: subset transaksi (Cabang, Tanggal, Omset) untuk 1 kategori.
+    target_col: 'TargetAll' / 'TargetService' / 'TargetGadget'."""
+    ts_acuan = pd.Timestamp(tanggal_acuan)
+    bulan_ini_awal = pd.Timestamp(tanggal_acuan.replace(day=1))
+    bulan_lalu_akhir = bulan_ini_awal - timedelta(days=1)
+    bulan_lalu_awal = bulan_lalu_akhir.replace(day=1)
+
+    rows = []
+    for cabang in branches:
+        sub = df_kategori[df_kategori["Cabang"] == cabang]
+
+        trow = None
+        if not df_target.empty:
+            cand = df_target[
+                (df_target["Cabang"] == cabang)
+                & (df_target["PeriodeMulai"] <= tanggal_acuan)
+                & (df_target["PeriodeSelesai"] >= tanggal_acuan)
+            ]
+            if not cand.empty:
+                trow = cand.iloc[0]
+
+        target = total_hari = hari_berjalan = sisa_hari = omset_harian = expected_value = None
+        periode_mulai = periode_selesai = None
+        if trow is not None:
+            target = float(trow[target_col])
+            periode_mulai = trow["PeriodeMulai"]
+            periode_selesai = trow["PeriodeSelesai"]
+            total_hari = (periode_selesai - periode_mulai).days + 1
+            hari_berjalan = max(0, min(total_hari, (tanggal_acuan - periode_mulai).days + 1))
+            sisa_hari = total_hari - hari_berjalan
+            omset_harian = target / total_hari if total_hari else None
+            expected_value = omset_harian * hari_berjalan if omset_harian is not None else None
+
+        hari_ini = sub.loc[sub["Tanggal"] == ts_acuan, "Omset"].sum()
+        if periode_mulai is not None:
+            sd_hari_ini = sub.loc[
+                (sub["Tanggal"] >= pd.Timestamp(periode_mulai)) & (sub["Tanggal"] <= ts_acuan), "Omset"
+            ].sum()
+        else:
+            sd_hari_ini = sub.loc[sub["Tanggal"] <= ts_acuan, "Omset"].sum()
+
+        pct = (sd_hari_ini / expected_value) if expected_value else None
+        gap_vs_expected = (sd_hari_ini - expected_value) if expected_value is not None else None
+        total_gap_samurai = (target - sd_hari_ini) if target is not None else None
+        kejar_perhari = (total_gap_samurai / sisa_hari) if sisa_hari else None
+
+        hari_lalu_terpakai = (bulan_lalu_akhir - bulan_lalu_awal).days + 1
+        omset_bulan_lalu = sub.loc[
+            (sub["Tanggal"] >= bulan_lalu_awal) & (sub["Tanggal"] <= bulan_lalu_akhir), "Omset"
+        ].sum()
+        periode_bulan_lalu = omset_bulan_lalu / hari_lalu_terpakai if hari_lalu_terpakai else 0
+
+        hari_ini_terpakai = (ts_acuan - bulan_ini_awal).days + 1
+        omset_bulan_ini = sub.loc[
+            (sub["Tanggal"] >= bulan_ini_awal) & (sub["Tanggal"] <= ts_acuan), "Omset"
+        ].sum()
+        periode_bulan_ini = omset_bulan_ini / hari_ini_terpakai if hari_ini_terpakai > 0 else 0
+
+        gap_rata2 = periode_bulan_ini - periode_bulan_lalu
+
+        rows.append(
+            {
+                "CABANG": cabang,
+                "OMSET SAMURAI": target,
+                "OMSET HARIAN (DR TARGET)": omset_harian,
+                "EXPECTED VALUE": expected_value,
+                "HARI INI": hari_ini,
+                "S/D HARI INI": sd_hari_ini,
+                "% PENCAPAIAN": pct,
+                "GAP VS EXPECTED": gap_vs_expected,
+                "TOTAL GAP SAMURAI": total_gap_samurai,
+                "KEJAR TARGET PERHARI": kejar_perhari,
+                "PERIODE BULAN LALU": periode_bulan_lalu,
+                "PERIODE BULAN INI": periode_bulan_ini,
+                "GAP": gap_rata2,
+                "SISA HARI": sisa_hari,
+            }
+        )
+
+    result = pd.DataFrame(rows)
+
+    total = {"CABANG": "SMM"}
+    for col in ["OMSET SAMURAI", "EXPECTED VALUE", "HARI INI", "S/D HARI INI",
+                "TOTAL GAP SAMURAI", "PERIODE BULAN LALU", "PERIODE BULAN INI"]:
+        total[col] = result[col].sum(skipna=True) if result[col].notna().any() else None
+    total["OMSET HARIAN (DR TARGET)"] = (
+        result["OMSET HARIAN (DR TARGET)"].sum(skipna=True) if result["OMSET HARIAN (DR TARGET)"].notna().any() else None
+    )
+    total["% PENCAPAIAN"] = (
+        total["S/D HARI INI"] / total["EXPECTED VALUE"]
+        if total.get("EXPECTED VALUE") else None
+    )
+    total["GAP VS EXPECTED"] = (
+        total["S/D HARI INI"] - total["EXPECTED VALUE"]
+        if total.get("EXPECTED VALUE") is not None else None
+    )
+    sisa_hari_total = result["SISA HARI"].dropna()
+    sisa_hari_repr = sisa_hari_total.iloc[0] if not sisa_hari_total.empty else None
+    total["KEJAR TARGET PERHARI"] = (
+        total["TOTAL GAP SAMURAI"] / sisa_hari_repr
+        if total.get("TOTAL GAP SAMURAI") is not None and sisa_hari_repr
+        else None
+    )
+    total["GAP"] = (
+        (total["PERIODE BULAN INI"] - total["PERIODE BULAN LALU"])
+        if total.get("PERIODE BULAN INI") is not None
+        else None
+    )
+    total["SISA HARI"] = sisa_hari_repr
+
+    result = pd.concat([result, pd.DataFrame([total])], ignore_index=True)
+    return result
+
+
+MONEY_COLS = [
+    "OMSET SAMURAI", "OMSET HARIAN (DR TARGET)", "EXPECTED VALUE", "HARI INI", "S/D HARI INI",
+    "GAP VS EXPECTED", "TOTAL GAP SAMURAI", "KEJAR TARGET PERHARI",
+    "PERIODE BULAN LALU", "PERIODE BULAN INI", "GAP",
+]
+
+
+def style_scoreboard(df: pd.DataFrame):
+    display_df = df.drop(columns=["SISA HARI"]).copy()
+
+    def color_pct(v):
+        if pd.isna(v):
+            return ""
+        if v >= 1:
+            return "background-color:#c6efce;color:#006100"
+        if v >= 0.8:
+            return "background-color:#ffeb9c;color:#9c6500"
+        return "background-color:#ffc7ce;color:#9c0006"
+
+    def color_pos_good(v):
+        if pd.isna(v):
+            return ""
+        return "background-color:#c6efce;color:#006100" if v >= 0 else "background-color:#ffc7ce;color:#9c0006"
+
+    def color_pos_bad(v):
+        if pd.isna(v):
+            return ""
+        return "background-color:#ffc7ce;color:#9c0006" if v > 0 else "background-color:#c6efce;color:#006100"
+
+    sty = display_df.style
+    sty = sty.map(color_pct, subset=["% PENCAPAIAN"])
+    sty = sty.map(color_pos_good, subset=["GAP VS EXPECTED", "GAP"])
+    sty = sty.map(color_pos_bad, subset=["TOTAL GAP SAMURAI"])
+    fmt = {c: format_number for c in MONEY_COLS}
+    fmt["% PENCAPAIAN"] = format_percent
+    sty = sty.format(fmt, na_rep="-")
+    sty = sty.set_properties(**{"text-align": "right"}, subset=MONEY_COLS + ["% PENCAPAIAN"])
+    return sty
+
+
+# --------------------------------------------------------------------------------------
 # Sidebar: upload data
 # --------------------------------------------------------------------------------------
 
 st.sidebar.title("📥 Data")
 
 st.sidebar.caption(
-    "Upload file data per cabang (masing-masing file = data 1 cabang, format sama seperti "
-    "sheet 'Faktur Penjualan'). Bisa pilih banyak file sekaligus, sampai 50 file."
+    "Upload file data per cabang (masing-masing file = data 1 cabang, kolom minimal: "
+    "TGL FAKTUR, KATEGORI PENJUALAN, TOTAL HARGA). Bisa pilih banyak file sekaligus, sampai 50 file."
 )
 main_uploads = st.sidebar.file_uploader(
-    "Upload file data cabang",
-    type=["xlsx"],
-    accept_multiple_files=True,
-    key="main_uploads",
+    "Upload file data cabang", type=["xlsx"], accept_multiple_files=True, key="main_uploads"
 )
 if main_uploads:
     existing = len(os.listdir(MAIN_DATA_DIR))
@@ -317,11 +579,19 @@ if main_uploads:
             f"hapus beberapa dulu di bawah sebelum upload {len(main_uploads)} file baru."
         )
     else:
+        saved, failed = 0, []
         for uf in main_uploads:
             safe_name = sanitize_filename(uf.name)
-            with open(os.path.join(MAIN_DATA_DIR, safe_name), "wb") as f:
-                f.write(uf.getbuffer())
-        st.sidebar.success(f"{len(main_uploads)} file tersimpan.")
+            try:
+                with open(os.path.join(MAIN_DATA_DIR, safe_name), "wb") as f:
+                    f.write(uf.getbuffer())
+                saved += 1
+            except Exception as e:  # noqa: BLE001
+                failed.append(f"{uf.name}: {e}")
+        if saved:
+            st.sidebar.success(f"{saved} file tersimpan.")
+        if failed:
+            st.sidebar.error("Gagal menyimpan:\n" + "\n".join(failed))
 
 stored_main_files = sorted(os.listdir(MAIN_DATA_DIR))
 if stored_main_files:
@@ -339,11 +609,7 @@ if stored_main_files:
 
 st.sidebar.markdown("---")
 
-corp_upload = st.sidebar.file_uploader(
-    "Upload file Data Marketing Corporate",
-    type=["xlsx"],
-    key="corp_upload",
-)
+corp_upload = st.sidebar.file_uploader("Upload file Data Marketing Corporate", type=["xlsx"], key="corp_upload")
 if corp_upload is not None:
     with open(CORPORATE_DATA_PATH, "wb") as f:
         f.write(corp_upload.getbuffer())
@@ -356,9 +622,24 @@ st.sidebar.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
+st.sidebar.markdown("---")
+
+target_upload = st.sidebar.file_uploader("Upload file Data Target (untuk tab Scoreboard)", type=["xlsx"], key="target_upload")
+if target_upload is not None:
+    with open(TARGET_DATA_PATH, "wb") as f:
+        f.write(target_upload.getbuffer())
+    st.sidebar.success("File Target tersimpan.")
+
+st.sidebar.download_button(
+    "⬇️ Download template Target",
+    data=make_target_template(),
+    file_name="template_target.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
 st.sidebar.caption(
     "File yang sudah diupload akan otomatis dipakai lagi setiap kali dashboard dibuka, "
-    "sampai diganti dengan file baru."
+    "sampai diganti/dihapus. Upload ulang dengan nama file sama = update (bukan duplikat)."
 )
 
 # --------------------------------------------------------------------------------------
@@ -375,10 +656,7 @@ with st.spinner(f"Memproses {len(os.listdir(MAIN_DATA_DIR))} file data cabang...
     df_main, load_errors = load_all_main_data(MAIN_DATA_DIR)
 
 if load_errors:
-    st.warning(
-        "Sebagian file dilewati karena formatnya tidak cocok:\n\n"
-        + "\n".join(f"- {e}" for e in load_errors)
-    )
+    st.warning("Sebagian file dilewati karena formatnya tidak cocok:\n\n" + "\n".join(f"- {e}" for e in load_errors))
 
 if df_main.empty:
     st.warning("Tidak ada data transaksi yang bisa dibaca dari file yang diupload.")
@@ -392,130 +670,150 @@ if os.path.exists(CORPORATE_DATA_PATH):
         df_corp = load_corporate_data(corp_bytes)
     except ValueError as e:
         st.warning(f"Data Marketing Corporate tidak dipakai: {e}")
-else:
-    st.sidebar.info(
-        "Belum ada data Marketing Corporate. Download template di atas, isi, lalu upload."
-    )
+
+df_target = pd.DataFrame(columns=["Cabang", "PeriodeMulai", "PeriodeSelesai", "TargetService", "TargetGadget", "TargetAll"])
+if os.path.exists(TARGET_DATA_PATH):
+    with open(TARGET_DATA_PATH, "rb") as f:
+        target_bytes = f.read()
+    try:
+        df_target = load_target_data(target_bytes)
+    except ValueError as e:
+        st.warning(f"Data Target tidak dipakai: {e}")
 
 # --------------------------------------------------------------------------------------
-# Filter
+# Filter (dipakai di tab Ringkasan)
 # --------------------------------------------------------------------------------------
 
 st.sidebar.markdown("---")
-st.sidebar.title("🔎 Filter")
+st.sidebar.title("🔎 Filter Ringkasan")
 
 tahun_options = sorted(set(df_main["Tahun"]).union(set(df_corp["Tahun"])), reverse=True)
 bulan_options = list(range(1, 13))
-cabang_options = sorted(set(df_main["Cabang"]).union(set(df_corp["Cabang"])))
+cabang_options = sorted(set(df_main["Cabang"]).union(set(df_corp["Cabang"])).union(set(df_target["Cabang"])))
 
 sel_tahun = st.sidebar.multiselect("Tahun", tahun_options, default=tahun_options)
-sel_bulan = st.sidebar.multiselect(
-    "Bulan", bulan_options, default=bulan_options, format_func=lambda m: BULAN_ID[m - 1]
-)
+sel_bulan = st.sidebar.multiselect("Bulan", bulan_options, default=bulan_options, format_func=lambda m: BULAN_ID[m - 1])
 sel_cabang = st.sidebar.multiselect("Cabang", cabang_options, default=cabang_options)
+
+st.sidebar.markdown("---")
+st.sidebar.title("🎯 Tanggal Acuan (Scoreboard)")
+tanggal_acuan = st.sidebar.date_input("Dianggap sebagai 'Hari Ini'", value=date.today())
 
 if not sel_tahun or not sel_bulan or not sel_cabang:
     st.warning("Pilih minimal satu Tahun, Bulan, dan Cabang di sidebar.")
     st.stop()
 
-f_main = df_main[
-    df_main["Tahun"].isin(sel_tahun)
-    & df_main["Bulan"].isin(sel_bulan)
-    & df_main["Cabang"].isin(sel_cabang)
-]
-f_corp = df_corp[
-    df_corp["Tahun"].isin(sel_tahun)
-    & df_corp["Bulan"].isin(sel_bulan)
-    & df_corp["Cabang"].isin(sel_cabang)
-]
+f_main = df_main[df_main["Tahun"].isin(sel_tahun) & df_main["Bulan"].isin(sel_bulan) & df_main["Cabang"].isin(sel_cabang)]
+f_corp = df_corp[df_corp["Tahun"].isin(sel_tahun) & df_corp["Bulan"].isin(sel_bulan) & df_corp["Cabang"].isin(sel_cabang)]
+
+tab_ringkasan, tab_scoreboard = st.tabs(["📈 Ringkasan", "🏆 Scoreboard"])
 
 # --------------------------------------------------------------------------------------
-# KPI
+# TAB 1: Ringkasan
 # --------------------------------------------------------------------------------------
 
-omset_all = f_main["Omset"].sum()
-omset_service = f_main.loc[f_main["Kelompok"] == "Service", "Omset"].sum()
-omset_gadget = f_main.loc[f_main["Kelompok"] == "Gadget & Aksesoris", "Omset"].sum()
-omset_corporate = f_corp["Omset"].sum()
+with tab_ringkasan:
+    omset_all = f_main["Omset"].sum()
+    omset_service = f_main.loc[f_main["Kelompok"] == "Service", "Omset"].sum()
+    omset_gadget = f_main.loc[f_main["Kelompok"] == "Gadget & Aksesoris", "Omset"].sum()
+    omset_corporate = f_corp["Omset"].sum()
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Omset All", format_rupiah(omset_all))
-c2.metric("Omset Service", format_rupiah(omset_service))
-c3.metric("Omset Gadget & Aksesoris", format_rupiah(omset_gadget))
-c4.metric("Omset Marketing Corporate", format_rupiah(omset_corporate))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Omset All", format_rupiah(omset_all))
+    c2.metric("Omset Service", format_rupiah(omset_service))
+    c3.metric("Omset Gadget & Aksesoris", format_rupiah(omset_gadget))
+    c4.metric("Omset Marketing Corporate", format_rupiah(omset_corporate))
 
-st.markdown("---")
+    st.markdown("---")
+    st.subheader("Tren Omset per Bulan")
 
-# --------------------------------------------------------------------------------------
-# Tren bulanan
-# --------------------------------------------------------------------------------------
-
-st.subheader("Tren Omset per Bulan")
-
-trend_all = (
-    f_main.groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index().assign(Kategori="Omset All")
-)
-trend_service = (
-    f_main[f_main["Kelompok"] == "Service"]
-    .groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index().assign(Kategori="Omset Service")
-)
-trend_gadget = (
-    f_main[f_main["Kelompok"] == "Gadget & Aksesoris"]
-    .groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index().assign(Kategori="Omset Gadget & Aksesoris")
-)
-trend_corp = (
-    f_corp.groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index().assign(Kategori="Omset Marketing Corporate")
-    if not f_corp.empty
-    else pd.DataFrame({"Tahun": pd.Series(dtype="int64"), "Bulan": pd.Series(dtype="int64"),
-                        "Omset": pd.Series(dtype="float64"), "Kategori": pd.Series(dtype="object")})
-)
-
-trend_parts = [d for d in [trend_all, trend_service, trend_gadget, trend_corp] if not d.empty]
-trend = pd.concat(trend_parts, ignore_index=True) if trend_parts else trend_corp
-if not trend.empty:
-    trend["Periode"] = trend.apply(lambda r: f"{BULAN_ID[int(r['Bulan']) - 1][:3]} {int(r['Tahun'])}", axis=1)
-    trend["urut"] = trend["Tahun"] * 100 + trend["Bulan"]
-    trend = trend.sort_values("urut")
-    fig_trend = px.line(
-        trend, x="Periode", y="Omset", color="Kategori", markers=True,
-        category_orders={"Periode": trend["Periode"].unique().tolist()},
+    trend_all = f_main.groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index().assign(Kategori="Omset All")
+    trend_service = (
+        f_main[f_main["Kelompok"] == "Service"].groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index()
+        .assign(Kategori="Omset Service")
     )
-    fig_trend.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)")
-    st.plotly_chart(fig_trend, width="stretch")
-else:
-    st.info("Tidak ada data untuk kombinasi filter ini.")
-
-# --------------------------------------------------------------------------------------
-# Breakdown per cabang
-# --------------------------------------------------------------------------------------
-
-st.subheader("Omset per Cabang")
-
-by_branch_all = f_main.groupby("Cabang")["Omset"].sum().rename("Omset All")
-by_branch_service = f_main[f_main["Kelompok"] == "Service"].groupby("Cabang")["Omset"].sum().rename("Omset Service")
-by_branch_gadget = f_main[f_main["Kelompok"] == "Gadget & Aksesoris"].groupby("Cabang")["Omset"].sum().rename("Omset Gadget & Aksesoris")
-by_branch_corp = f_corp.groupby("Cabang")["Omset"].sum().rename("Omset Marketing Corporate")
-
-by_branch = pd.concat(
-    [by_branch_all, by_branch_service, by_branch_gadget, by_branch_corp], axis=1
-).astype(float).fillna(0.0).reset_index()
-
-bcol1, bcol2 = st.columns([2, 1])
-with bcol1:
-    branch_long = by_branch.melt(id_vars="Cabang", var_name="Kategori", value_name="Omset")
-    fig_branch = px.bar(
-        branch_long, x="Cabang", y="Omset", color="Kategori", barmode="group"
+    trend_gadget = (
+        f_main[f_main["Kelompok"] == "Gadget & Aksesoris"].groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index()
+        .assign(Kategori="Omset Gadget & Aksesoris")
     )
-    fig_branch.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)")
-    st.plotly_chart(fig_branch, width="stretch")
+    trend_corp = (
+        f_corp.groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index().assign(Kategori="Omset Marketing Corporate")
+        if not f_corp.empty
+        else pd.DataFrame({"Tahun": pd.Series(dtype="int64"), "Bulan": pd.Series(dtype="int64"),
+                            "Omset": pd.Series(dtype="float64"), "Kategori": pd.Series(dtype="object")})
+    )
 
-with bcol2:
-    display_df = by_branch.copy()
-    for col in display_df.columns[1:]:
-        display_df[col] = display_df[col].apply(format_rupiah)
-    st.dataframe(display_df, width="stretch", hide_index=True)
+    trend_parts = [d for d in [trend_all, trend_service, trend_gadget, trend_corp] if not d.empty]
+    trend = pd.concat(trend_parts, ignore_index=True) if trend_parts else trend_corp
+    if not trend.empty:
+        trend["Periode"] = trend.apply(lambda r: f"{BULAN_ID[int(r['Bulan']) - 1][:3]} {int(r['Tahun'])}", axis=1)
+        trend["urut"] = trend["Tahun"] * 100 + trend["Bulan"]
+        trend = trend.sort_values("urut")
+        fig_trend = px.line(
+            trend, x="Periode", y="Omset", color="Kategori", markers=True,
+            category_orders={"Periode": trend["Periode"].unique().tolist()},
+        )
+        fig_trend.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)")
+        st.plotly_chart(fig_trend, width="stretch")
+    else:
+        st.info("Tidak ada data untuk kombinasi filter ini.")
 
-st.caption(
-    "Omset All & Omset Service & Omset Gadget dihitung dari sheet 'Faktur Penjualan'. "
-    "Omset Marketing Corporate dihitung dari file terpisah yang diupload (lihat sidebar)."
-)
+    st.subheader("Omset per Cabang")
+
+    by_branch_all = f_main.groupby("Cabang")["Omset"].sum().rename("Omset All")
+    by_branch_service = f_main[f_main["Kelompok"] == "Service"].groupby("Cabang")["Omset"].sum().rename("Omset Service")
+    by_branch_gadget = f_main[f_main["Kelompok"] == "Gadget & Aksesoris"].groupby("Cabang")["Omset"].sum().rename("Omset Gadget & Aksesoris")
+    by_branch_corp = f_corp.groupby("Cabang")["Omset"].sum().rename("Omset Marketing Corporate")
+
+    by_branch = pd.concat(
+        [by_branch_all, by_branch_service, by_branch_gadget, by_branch_corp], axis=1
+    ).astype(float).fillna(0.0).reset_index()
+
+    bcol1, bcol2 = st.columns([2, 1])
+    with bcol1:
+        branch_long = by_branch.melt(id_vars="Cabang", var_name="Kategori", value_name="Omset")
+        fig_branch = px.bar(branch_long, x="Cabang", y="Omset", color="Kategori", barmode="group")
+        fig_branch.update_layout(legend_title_text="", xaxis_title="", yaxis_title="Omset (Rp)")
+        st.plotly_chart(fig_branch, width="stretch")
+    with bcol2:
+        display_df = by_branch.copy()
+        for col in display_df.columns[1:]:
+            display_df[col] = display_df[col].apply(format_rupiah)
+        st.dataframe(display_df, width="stretch", hide_index=True)
+
+    st.caption(
+        "Omset All & Omset Service & Omset Gadget dihitung dari data cabang yang diupload. "
+        "Omset Marketing Corporate dihitung dari file terpisah yang diupload (lihat sidebar)."
+    )
+
+# --------------------------------------------------------------------------------------
+# TAB 2: Scoreboard
+# --------------------------------------------------------------------------------------
+
+with tab_scoreboard:
+    st.caption(
+        f"Tanggal acuan: **{tanggal_acuan.strftime('%d/%m/%Y')}**. "
+        "Ubah di sidebar kalau mau lihat posisi di tanggal lain."
+    )
+
+    if df_target.empty:
+        st.info(
+            "Belum ada data Target. Download template Target di sidebar, isi Cabang / Periode Mulai / "
+            "Periode Selesai / Target Service / Target Gadget & Aksesoris, lalu upload. Tanpa data ini, "
+            "kolom Target / Expected Value / % Pencapaian / Gap / Kejar Target tidak bisa dihitung — "
+            "tabel di bawah tetap tampil dengan kolom lain saja."
+        )
+
+    branches_sb = sel_cabang if sel_cabang else cabang_options
+
+    kategori_map = {
+        "Omset All": (df_main, "TargetAll"),
+        "Omset Service": (df_main[df_main["Kelompok"] == "Service"], "TargetService"),
+        "Omset Gadget & Aksesoris": (df_main[df_main["Kelompok"] == "Gadget & Aksesoris"], "TargetGadget"),
+    }
+
+    for label, (subset, target_col) in kategori_map.items():
+        st.subheader(f"Scoreboard {label}")
+        board = build_scoreboard(subset, df_target, target_col, branches_sb, tanggal_acuan)
+        st.dataframe(style_scoreboard(board), width="stretch", hide_index=True, height=(len(board) + 1) * 36)
+        st.markdown("")
