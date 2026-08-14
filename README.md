@@ -1,120 +1,74 @@
 # Dashboard Omset MFlash
 
-Dashboard Streamlit untuk memantau omset & performa 18 cabang MFlash: Omset All, Omset
-Service, Omset Gadget & Aksesoris, Marketing Corporate, performa Iklan Meta Ads, dan
-Walk-in (jumlah order servis) per cabang — lengkap dengan export laporan presentasi.
+Dashboard Streamlit untuk monitoring Omset, Iklan, dan Walk-in 18 cabang MFlash.
 
-## Cara pakai
+## Cara Menjalankan
 
-1. Install dependency:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Jalankan:
-   ```bash
-   streamlit run app.py
-   ```
-3. Upload data lewat sidebar:
-   - **Upload file data cabang** — file per-cabang, atau langsung file master yang punya
-     sheet `Faktur Penjualan` + `Scoreboard` (target & scoreboard Marketing Corporate
-     otomatis kebaca dari situ). Bisa banyak file sekaligus, sampai 50 file.
-   - **Data Marketing Corporate (manual)** dan **Data Target (manual)** — opsional, hanya
-     diperlukan kalau file di atas tidak punya sheet `Scoreboard`. Template tersedia di sidebar.
-   - **Data Iklan Meta Ads** — hasil export "Campaigns" dari Meta Ads Manager (Export >
-     Excel). Sampai 50 file.
-   - **Data Walk-in (Pengiriman Pesanan)** — file "Rincian Pengiriman Pesanan" per cabang
-     dari sistem service. Sampai 60 file (1 file = 1 cabang).
-
-Semua file yang sudah diupload disimpan dan otomatis dipakai lagi setiap dashboard dibuka.
-Upload ulang dengan nama file sama = update, bukan duplikat.
-
-## Tab Ringkasan
-
-- Kartu KPI (Omset All / Service / Gadget & Aksesoris / Marketing Corporate) dengan badge
-  % pencapaian.
-- Progress ring % pencapaian per kategori (🟢 ≥100% · 🟡 85-99,9% · 🔴 <85%).
-- **Kontribusi terhadap Omset All** — donut chart Service / Penjualan Retail / Marketing
-  Corporate.
-- Tren omset bulanan & omset per cabang, dengan filter Tahun/Bulan/Cabang di sidebar.
-
-## Tab Scoreboard
-
-- Tabel scoreboard per cabang (Omset All / Service / Gadget & Aksesoris / Marketing
-  Corporate) gaya scoreboard: Detail Target, Detail Pencapaian, Detail Gap, Monitoring
-  Progress Rata-rata/Hari.
-- **Riwayat Pencapaian Harian** — dibangun dari ledger permanen, mencatat satu snapshot
-  per cabang setiap kali file diupload, jadi histori tidak hilang walau harinya sudah lewat.
-- **Insight & Rekomendasi Perbaikan** — dikelompokkan per kategori (Omset Service /
-  Penjualan Gadget & Aksesoris / Marketing Corporate). Tiap kartu menampilkan pernyataan
-  masalah di atas, lalu rencana aksi **🌐 Online** dan **🏬 Offline** sebagai bullet list
-  berdampingan supaya mudah dibaca (bukan satu paragraf panjang).
-- **To-Do List Evaluasi Cabang** — checklist interaktif, dikelompokkan per kategori. Buka
-  "Lihat rencana aksi" pada tiap item untuk detail Online/Offline-nya.
-- Marketing Corporate **Hari Ini** dihitung dari selisih S/D Hari Ini vs snapshot upload
-  sebelumnya (ledger delta), dengan estimasi Periode Bulan Ini (ditandai `*`) pada upload
-  pertama.
-
-## Tab Iklan (Meta Ads)
-
-- KPI Total Spend, Messaging Conversations, Rata-rata Cost per Messaging, Campaign Aktif.
-- Performa per cabang (bar chart & tabel) dan detail per campaign.
-- **Insight & Rekomendasi Improvement** — diagnosis KONTEN (creative/hook/CTA) vs FUNNEL
-  (kecepatan respon admin) berdasarkan perbandingan CTR terhadap median.
-
-## Tab Walk-in Cabang
-
-- Upload file **Rincian Pengiriman Pesanan** per cabang (sampai 60 file).
-- **Total Walk-in** per bulan per cabang = jumlah **NOMOR PENGIRIMAN PESANAN yang unik**.
-- **Rata-rata Walk-in per Hari** = Total Walk-in ÷ Hari Efektif.
-- Filter Cabang / Tahun / Bulan, KPI, bar chart, tabel detail, dan insight penurunan
-  walk-in bulan-ke-bulan per cabang.
-
-## Export Laporan untuk Presentasi (PPTX & PDF)
-
-Di bagian paling bawah dashboard (di luar tab, jadi selalu tampil) ada dua tombol:
-**📊 Download PowerPoint (.pptx)** dan **📄 Download PDF (.pdf)**. Laporan ini otomatis
-dibangun dari data yang sedang diupload dan berisi, untuk masing-masing dari 3 domain
-(Omset & Scoreboard, Iklan Meta Ads, Walk-in Cabang):
-
-- **Penyajian Data** — tabel ringkasan KPI per cabang + grafik batang.
-- **Evaluasi** — daftar temuan (penurunan omset/walk-in, campaign iklan kurang efisien, dsb).
-- **Rencana Perbaikan** — rencana aksi Online & Offline per kategori (dirangkum sekali per
-  kategori, tidak diulang per cabang) untuk siap dipresentasikan ke CEO.
-
-Laporan dibuat ulang otomatis setiap dashboard dibuka/data berubah, jadi selalu sinkron
-dengan angka yang tampil di layar.
-
-## Tampilan & Branding
-
-- Ikon aplikasi (favicon/tab browser) memakai logo MFlash, bukan ikon bawaan Streamlit.
-- Menu hamburger, tombol "Deploy", dan footer "Made with Streamlit" disembunyikan supaya
-  tampilan bersih untuk dipakai presentasi ke pihak luar.
-
-## Aturan perhitungan
-
-- **Omset Service** = baris transaksi dengan `KATEGORI BARANG` = "Jasa" atau "Sparepart".
-- **Omset Gadget & Aksesoris** = Omset All dikurangi Omset Service.
-- **% Pencapaian** = S/D Hari Ini ÷ Expected Value (target harian × hari berjalan periode).
-- **Total Walk-in** = jumlah `NOMOR PENGIRIMAN PESANAN` unik per cabang per bulan.
-- Warna threshold konsisten di semua ring/badge/tabel: 🟢 ≥100% · 🟡 85-99,9% · 🔴 <85%.
-
-## Struktur file
-
+```bash
+pip install -r requirements.txt
+streamlit run app.py
 ```
-dashboard_mflash/
-├── app.py                  # aplikasi utama
-├── requirements.txt
-├── README.md
-├── .gitignore
-├── assets/
-│   ├── logo_small.png      # logo MFlash (juga di-embed sebagai base64 di app.py)
-│   └── logo_b64.txt
-└── data/                   # dibuat otomatis, isi file upload & ledger (tidak di-commit)
-    ├── main/                    # file data cabang
-    ├── ads/                     # file export Meta Ads
-    ├── walkin/                  # file Rincian Pengiriman Pesanan
-    ├── corporate_data.xlsx      # data Marketing Corporate manual (opsional)
-    ├── target_data.xlsx         # data Target manual (opsional)
-    ├── history_log.csv          # ledger riwayat omset harian
-    └── history_log_corp.csv     # ledger riwayat S/D Hari Ini Marketing Corporate
-```
+
+## Struktur Tab
+
+1. **📊 Ringkasan** — KPI card Omset Service / Gadget & Aksesoris / All, kontribusi per kategori (pie chart), progress ring % pencapaian, grafik progres harian (aktual vs target pace lurus), dan riwayat pencapaian harian dari ledger upload.
+2. **🎯 Scoreboard** — Tabel scoreboard berwarna (Service, Gadget & Aksesoris, All, Marketing Corporate) lengkap dengan target, expected value, gap, dan kejar target per hari. Di bawahnya ada **Insight & Rekomendasi Perbaikan** dan **To Do List**, keduanya dikelompokkan rapi per kategori (Omset Service / Penjualan Gadget & Aksesoris / Marketing Corporate) dengan rencana aksi 🌐 Online dan 🏬 Offline terpisah supaya mudah dibaca.
+3. **📢 Iklan** — Ringkasan spend, Messaging Conversation, cost per conversation per campaign, plus insight otomatis (campaign boros, campaign mahal, campaign efisien untuk di-scale-up, evaluasi konten vs funnel).
+4. **🚶 Walk-in** — Total walk-in & rata-rata per hari per cabang per bulan, plus insight otomatis untuk cabang yang trafiknya turun signifikan.
+
+## Data Omset Utama — Dua Format Didukung
+
+Dashboard secara otomatis mendeteksi format file yang diupload di slot "1️⃣ Data Omset Utama", tidak perlu memilih format secara manual:
+
+- **Format lama (file master)** — satu file berisi sheet `Faktur Penjualan` (data transaksi seluruh cabang) dan sheet `Scoreboard` (untuk auto-ekstrak Target & Scoreboard Marketing Corporate). Cocok untuk upload satu file besar.
+- **Format baru (per cabang)** — file export "Rincian Faktur Penjualan", satu file per cabang. Cabang diambil otomatis dari nama file. Bisa upload sampai 18 file (atau lebih) sekaligus. Format ini **tidak** punya sheet Scoreboard, sehingga:
+  - Target harus diisi manual lewat template Target di sidebar (opsional, hanya jika ingin pencapaian vs target).
+  - Data Marketing Corporate harus diisi manual lewat template Corporate di sidebar (opsional).
+
+Kedua format bisa digabung — misalnya beberapa cabang masih pakai format lama dan cabang lain sudah pakai format baru, dashboard akan menggabungkan datanya secara otomatis.
+
+**Aturan perhitungan (berlaku untuk kedua format):**
+- **Omset Service** = jumlah `TOTAL HARGA` dari baris dengan `KATEGORI BARANG` = JASA atau SPAREPART.
+- **Omset Gadget & Aksesoris** = jumlah `TOTAL HARGA` dari baris dengan kategori barang selain JASA/SPAREPART (HP, laptop, aksesoris, kartu perdana, parfum, dll).
+- **Omset All** = Omset Service + Omset Gadget & Aksesoris.
+
+## Export Laporan untuk Presentasi (PPTX / PDF)
+
+Di bagian bawah dashboard ada tombol **📤 Export Laporan untuk Presentasi** yang menghasilkan file PowerPoint (.pptx) atau PDF siap dipresentasikan ke CEO, berisi untuk masing-masing kategori (Omset, Iklan, Walk-in):
+- **Penyajian Data** — ringkasan KPI dalam bentuk tabel/slide.
+- **Evaluasi** — daftar temuan/masalah dari insight engine.
+- **Rencana Perbaikan** — rencana aksi 🌐 Online dan 🏬 Offline.
+
+Laporan mengikuti filter Tanggal Acuan & Cabang yang sedang aktif di dashboard.
+
+## ⚠️ GitHub Auto-Backup (supaya data tidak hilang saat app sleep/restart)
+
+Streamlit Community Cloud menjalankan app di container yang disk-nya **sementara** — begitu app di-sleep (tidak dipakai lama) atau di-restart/redeploy, semua file yang diupload lewat dashboard (data omset, iklan, walk-in, target, corporate, ledger histori) akan **hilang** karena hanya tersimpan di disk lokal container, bukan di repo Git.
+
+Untuk mencegah ini, dashboard mendukung auto-backup setiap file yang diupload langsung ke sebuah repo GitHub lewat GitHub API. Setiap kali app start, dashboard otomatis menarik kembali file-file itu dari GitHub sebelum menampilkan data.
+
+### Cara setup:
+
+1. Buat repo GitHub baru (boleh **private**) khusus untuk menyimpan data dashboard ini, misal `mflash-dashboard-data`.
+2. Buat **Personal Access Token (PAT)** di GitHub: Settings → Developer settings → Personal access tokens → Fine-grained tokens (atau classic token dengan scope `repo`). Beri akses ke repo yang dibuat di langkah 1.
+3. Di Streamlit Community Cloud, buka pengaturan app → **Secrets**, lalu tambahkan:
+
+   ```toml
+   [github]
+   token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   repo = "username-anda/mflash-dashboard-data"
+   branch = "main"
+   ```
+
+4. Save & reboot app. Kalau secrets sudah benar, sidebar akan menampilkan "☁️ Auto-backup ke GitHub: **aktif**".
+
+### Catatan:
+- Ukuran file per-upload dibatasi ~90MB oleh GitHub API (biasanya cukup untuk file Excel omset).
+- Data yang di-backup: semua file di folder `data/main`, `data/ads`, `data/walkin`, file target/corporate manual, dan ledger histori (`history_log.csv`, `corp_history_log.csv`).
+- Kalau backup gagal (misal token salah/kadaluarsa), dashboard tetap jalan seperti biasa tapi akan menampilkan peringatan di sidebar — data tetap berisiko hilang saat app sleep sampai backup diperbaiki.
+- Fitur ini **opsional** — kalau secrets tidak diisi, dashboard tetap berfungsi normal tanpa backup (sama seperti sebelumnya).
+
+## Catatan Lain
+
+- "Zzzz - This app has gone to sleep" adalah perilaku normal hosting gratis Streamlit Community Cloud setelah tidak diakses beberapa waktu — cukup klik "Yes, get this app back up!", bukan bug.
+- Ledger histori (`history_log.csv`, `corp_history_log.csv`) mencatat snapshot omset setiap kali file diupload, supaya grafik "Riwayat Pencapaian Harian" tetap ada meski file lama sudah diganti/dihapus.
