@@ -11,7 +11,13 @@ streamlit run app.py
 
 ## Kalau Sidebar "Kelola Data" (Upload File) Tidak Muncul
 
-Sidebar memang **default tersembunyi/collapsed** di layar sempit atau kalau browser sudah pernah menutupnya sebelumnya. Cari panah kecil **"»"** di pojok kiri atas halaman (di sebelah kiri judul) dan klik untuk membuka sidebar. Sidebar berisi semua tombol upload data (Omset, Iklan, Walk-in, Target, Corporate).
+Penyebab paling umum: CSS kustom yang menyembunyikan menu/toolbar bawaan Streamlit ikut menyembunyikan tombol panah buka/tutup sidebar. Versi app.py ini sudah diperbaiki — hanya `#MainMenu` dan `footer` yang disembunyikan, toolbar/header **tidak** disentuh sama sekali, dan sidebar diset default terbuka (`initial_sidebar_state="expanded"`).
+
+Kalau setelah redeploy versi ini sidebar masih belum muncul:
+1. Coba **hard refresh** browser (Ctrl+Shift+R / Cmd+Shift+R) — browser mungkin masih menyimpan cache halaman versi lama.
+2. Cek di pojok kiri atas halaman, ada panah kecil **"»"** — klik untuk membuka sidebar.
+3. Pastikan file `app.py` yang di-deploy di Streamlit Cloud memang sudah file yang terbaru (cek tab "Manage app" → lihat log deploy, pastikan tidak ada error saat build).
+4. Kalau halaman terlihat "macet"/tidak merespons klik sama sekali, coba buka di jendela browser baru (mode incognito) untuk memastikan bukan masalah cache/extension browser.
 
 ## Struktur Tab
 

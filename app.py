@@ -67,17 +67,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Sembunyikan chrome bawaan Streamlit (menu, footer, badge "streamlitApp", toolbar) TANPA
-# menyembunyikan header sepenuhnya - supaya tombol buka/tutup sidebar (panah "»" di kiri
-# atas) tetap terlihat dan bisa dipakai untuk membuka sidebar Kelola Data.
+# PENTING: hanya sembunyikan #MainMenu (hamburger menu) dan footer bawaan Streamlit -
+# JANGAN sentuh header/toolbar/decoration sama sekali, karena di versi Streamlit
+# terbaru tombol panah buka/tutup sidebar ("»") ikut berada di strip toolbar itu.
+# Kalau toolbar disembunyikan (mis. lewat [data-testid="stToolbar"] {display:none}),
+# tombol buka sidebar ikut hilang dan sidebar "Kelola Data" jadi tidak bisa dibuka sama
+# sekali - ini bug yang pernah terjadi di versi sebelumnya, jangan diulangi.
 st.markdown(
     """
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    [data-testid="stToolbar"] {visibility: hidden; height: 0; position: fixed;}
-    [data-testid="stDecoration"] {display: none;}
-    [data-testid="stStatusWidget"] {visibility: hidden;}
     </style>
     """,
     unsafe_allow_html=True,
