@@ -2860,17 +2860,34 @@ with tab1:
         )
 
     st.markdown("<br>", unsafe_allow_html=True)
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        st.markdown("**Kontribusi terhadap Omset All**")
-        pie_fig = render_contribution_pie(omset_service_val, omset_gadget_val, omset_corp_val)
-        if pie_fig is not None:
-            st.plotly_chart(pie_fig, use_container_width=True)
-        else:
-            st.caption("Belum ada data untuk periode ini.")
-    with c2:
-        st.markdown("**% Pencapaian Omset All (SMM)**")
+    st.markdown("**% Pencapaian per Kategori**")
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        st.markdown(
+            "<div style='text-align:center;font-size:13px;color:#374151;font-weight:600;'>🛠️ Omset Service</div>",
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(render_progress_ring(_pct_and_target_ratio(smm_service)), use_container_width=True)
+    with r2:
+        st.markdown(
+            "<div style='text-align:center;font-size:13px;color:#374151;font-weight:600;'>📱 Gadget & Aksesoris</div>",
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(render_progress_ring(_pct_and_target_ratio(smm_gadget)), use_container_width=True)
+    with r3:
+        st.markdown(
+            "<div style='text-align:center;font-size:13px;color:#374151;font-weight:600;'>💰 Omset All (SMM)</div>",
+            unsafe_allow_html=True,
+        )
         st.plotly_chart(render_progress_ring(_pct_and_target_ratio(smm_all)), use_container_width=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("**Kontribusi terhadap Omset All**")
+    pie_fig = render_contribution_pie(omset_service_val, omset_gadget_val, omset_corp_val)
+    if pie_fig is not None:
+        st.plotly_chart(pie_fig, use_container_width=True)
+    else:
+        st.caption("Belum ada data untuk periode ini.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("**Progres Harian — Omset All (Aktual vs Target Pace Lurus)**")
