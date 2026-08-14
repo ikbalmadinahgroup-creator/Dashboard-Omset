@@ -9,6 +9,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Kalau Sidebar "Kelola Data" (Upload File) Tidak Muncul
+
+Sidebar memang **default tersembunyi/collapsed** di layar sempit atau kalau browser sudah pernah menutupnya sebelumnya. Cari panah kecil **"»"** di pojok kiri atas halaman (di sebelah kiri judul) dan klik untuk membuka sidebar. Sidebar berisi semua tombol upload data (Omset, Iklan, Walk-in, Target, Corporate).
+
 ## Struktur Tab
 
 1. **📊 Ringkasan** — KPI card Omset Service / Gadget & Aksesoris / All, kontribusi per kategori (pie chart), progress ring % pencapaian, grafik progres harian (aktual vs target pace lurus), dan riwayat pencapaian harian dari ledger upload.
