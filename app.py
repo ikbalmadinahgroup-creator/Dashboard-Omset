@@ -1918,10 +1918,15 @@ def load_target_data(file_bytes: bytes) -> pd.DataFrame:
         raise ValueError("Kolom CABANG tidak ditemukan di file Target.")
     df = pd.DataFrame()
     df["CABANG"] = raw["CABANG"].astype(str).str.strip().str.upper()
+    # Pakai startswith (bukan exact match) supaya header dengan sufiks seperti
+    # "TARGET SERVICE (PER KUARTAL)" tetap terdeteksi sebagai kolom "TARGET SERVICE".
     for src, dst in [("TARGET SERVICE", "TargetService"), ("TARGET GADGET", "TargetGadget"),
                       ("TARGET ALL", "TargetAll"), ("TARGET CORPORATE", "TargetCorp"), ("TARGET CORP", "TargetCorp")]:
-        if src in raw.columns and dst not in df.columns:
-            df[dst] = pd.to_numeric(raw[src], errors="coerce").fillna(0)
+        if dst in df.columns:
+            continue
+        match_col = next((c for c in raw.columns if c.startswith(src)), None)
+        if match_col is not None:
+            df[dst] = pd.to_numeric(raw[match_col], errors="coerce").fillna(0)
     for col in _TARGET_DF_COLUMNS:
         if col not in df.columns:
             df[col] = 0.0
@@ -1934,10 +1939,10 @@ def make_target_template() -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Target"
-    ws.append(["Cabang", "Target Service (per kuartal)", "Target Gadget (per kuartal)", "Target All (per kuartal)", "Target Corporate (per kuartal)"])
+    ws.append(["Cabang", "Target Service", "Target Gadget", "Target All", "Target Corporate"])
     for b in BRANCH_ORDER[:3]:
         ws.append([b, 150000000, 180000000, 330000000, 45000000])
-    for col, w in zip("ABCDE", [16, 22, 22, 20, 24]):
+    for col, w in zip("ABCDE", [16, 16, 16, 14, 18]):
         ws.column_dimensions[col].width = w
 
     info = wb.create_sheet("Petunjuk")
