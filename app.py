@@ -6,6 +6,8 @@ Fitur utama:
 - Auto-deteksi 2 format file Omset utama: file master (sheet Faktur Penjualan +
   Scoreboard) ATAU file per-cabang "Rincian Faktur Penjualan" (bisa banyak file sekaligus)
 - Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet Scoreboard (kalau ada)
+- Target MFlash berlaku per KUARTAL (Jan-Mar/Apr-Jun/Jul-Sep/Okt-Des), % Pencapaian
+  dihitung kumulatif sejak awal kuartal s/d tanggal acuan (bukan per bulan)
 - Insight & Rekomendasi Perbaikan yang dikelompokkan rapi per kategori, dengan rencana
   aksi Online/Offline terpisah
 - Export laporan presentasi CEO (PPTX & PDF): Penyajian Data, Evaluasi, Perbaikan
@@ -1361,8 +1363,23 @@ def generate_pdf_report(sections: dict, periode_label: str) -> bytes:
 # --------------------------------------------------------------------------------------
 # Scoreboard: Omset per kelompok (Service / Gadget & Aksesoris / All), dengan
 # perbandingan periode bulan lalu (s/d tanggal yang sama) vs bulan ini, dan pencapaian
-# terhadap target (SMM = Sesuai Masih Mungkin / expected value harian x hari berjalan)
+# terhadap target (SMM = Sesuai Masih Mungkin / expected value harian x hari berjalan).
+#
+# PENTING: target MFlash ditetapkan per KUARTAL (3 bulan sekali: Jan-Mar, Apr-Jun,
+# Jul-Sep, Okt-Des) - BUKAN per bulan. Jadi EXPECTED VALUE & OMSET S/D HARI INI (yang
+# jadi basis % PENCAPAIAN) dihitung kumulatif sejak AWAL KUARTAL s/d tanggal acuan.
+# Kolom PERIODE BULAN LALU/PERIODE BULAN INI tetap dihitung per bulan - itu cuma
+# indikator tren rata-rata omset harian bulan-ke-bulan, tidak dipakai untuk % Pencapaian.
 # --------------------------------------------------------------------------------------
+
+def _quarter_bounds(d: date):
+    """Kembalikan (tanggal_awal, tanggal_akhir) kuartal kalender yang memuat tanggal d."""
+    q_start_month = ((d.month - 1) // 3) * 3 + 1
+    start = date(d.year, q_start_month, 1)
+    end_month = q_start_month + 2
+    end = date(d.year, end_month, calendar.monthrange(d.year, end_month)[1])
+    return start, end
+
 
 def build_scoreboard(df: pd.DataFrame, kelompok: str, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
     if df.empty:
@@ -1383,35 +1400,49 @@ def build_scoreboard(df: pd.DataFrame, kelompok: str, tanggal_acuan: date, selec
     days_in_bulan_lalu = calendar.monthrange(tahun_lalu, bulan_lalu)[1]
     hari_lalu_cutoff = min(hari_acuan, days_in_bulan_lalu)
 
-    ini = d[(d["Tahun"] == tahun_ini) & (d["Bulan"] == bulan_ini) & (d["Tanggal"].dt.day <= hari_acuan)]
+    # Bulan berjalan - HANYA dipakai untuk indikator tren rata-rata omset harian bulan-ke-
+    # bulan ("PERIODE BULAN LALU"/"PERIODE BULAN INI"), BUKAN untuk % Pencapaian terhadap
+    # target (target MFlash berlaku per kuartal, lihat _quarter_bounds()).
+    ini_bulan = d[(d["Tahun"] == tahun_ini) & (d["Bulan"] == bulan_ini) & (d["Tanggal"].dt.day <= hari_acuan)]
     lalu = d[(d["Tahun"] == tahun_lalu) & (d["Bulan"] == bulan_lalu) & (d["Tanggal"].dt.day <= hari_lalu_cutoff)]
     lalu_full = d[(d["Tahun"] == tahun_lalu) & (d["Bulan"] == bulan_lalu)]
 
-    sum_ini = ini.groupby("Cabang")["Omset"].sum()
+    sum_ini_bulan = ini_bulan.groupby("Cabang")["Omset"].sum()
     sum_lalu = lalu.groupby("Cabang")["Omset"].sum()
     sum_lalu_full = lalu_full.groupby("Cabang")["Omset"].sum()
 
-    branches = order_branches(set(sum_ini.index) | set(sum_lalu.index) | set(sum_lalu_full.index))
+    # Kuartal berjalan (Jan-Mar/Apr-Jun/Jul-Sep/Okt-Des) - dasar untuk kolom "OMSET S/D
+    # HARI INI" yang dibandingkan dengan EXPECTED VALUE untuk hitung % Pencapaian.
+    quarter_start, _ = _quarter_bounds(tanggal_acuan)
+    qtd = d[(d["Tanggal"].dt.date >= quarter_start) & (d["Tanggal"].dt.date <= tanggal_acuan)]
+    sum_qtd = qtd.groupby("Cabang")["Omset"].sum()
+
+    branches = order_branches(set(sum_ini_bulan.index) | set(sum_lalu.index) | set(sum_lalu_full.index) | set(sum_qtd.index))
     rows = []
     for b in branches:
-        oi = float(sum_ini.get(b, 0.0))
+        oi_bulan = float(sum_ini_bulan.get(b, 0.0))
+        oi_kuartal = float(sum_qtd.get(b, 0.0))
         ol = float(sum_lalu.get(b, 0.0))
         olf = float(sum_lalu_full.get(b, 0.0))
-        avg_ini = oi / hari_acuan if hari_acuan else 0.0
+        avg_ini = oi_bulan / hari_acuan if hari_acuan else 0.0
         avg_lalu = ol / hari_lalu_cutoff if hari_lalu_cutoff else 0.0
         rows.append({
-            "CABANG": b, "OMSET BULAN LALU (FULL)": olf, "OMSET S/D HARI INI": oi,
+            "CABANG": b, "OMSET BULAN LALU (FULL)": olf, "OMSET S/D HARI INI": oi_kuartal,
             "OMSET BULAN LALU S/D HARI SAMA": ol, "PERIODE BULAN LALU": avg_lalu, "PERIODE BULAN INI": avg_ini,
         })
     return pd.DataFrame(rows)
 
 
 def _finalize_scoreboard(sb: pd.DataFrame, df_target: pd.DataFrame, target_col: str, tanggal_acuan: date) -> pd.DataFrame:
-    """Tambahkan kolom TARGET & % PENCAPAIAN (Sesuai Masih Mungkin) dan baris total SMM."""
+    """Tambahkan kolom TARGET & % PENCAPAIAN (Sesuai Masih Mungkin) dan baris total SMM.
+    TARGET diasumsikan sudah berupa total 1 KUARTAL PENUH (3 bulan) - EXPECTED VALUE
+    dihitung dari rata-rata harian target kuartal dikali jumlah hari yang sudah berjalan
+    sejak awal kuartal s/d tanggal acuan (bukan dari awal bulan)."""
     if sb.empty:
         return sb
-    hari_acuan = tanggal_acuan.day
-    days_in_month = calendar.monthrange(tanggal_acuan.year, tanggal_acuan.month)[1]
+    quarter_start, quarter_end = _quarter_bounds(tanggal_acuan)
+    days_in_quarter = (quarter_end - quarter_start).days + 1
+    hari_berjalan_kuartal = (tanggal_acuan - quarter_start).days + 1
 
     target_map = {}
     if df_target is not None and not df_target.empty and target_col in df_target.columns:
@@ -1420,7 +1451,7 @@ def _finalize_scoreboard(sb: pd.DataFrame, df_target: pd.DataFrame, target_col: 
 
     sb = sb.copy()
     sb["TARGET"] = sb["CABANG"].map(lambda b: target_map.get(str(b).upper(), 0.0))
-    sb["EXPECTED VALUE"] = sb["TARGET"].apply(lambda t: (t / days_in_month) * hari_acuan if days_in_month else 0.0)
+    sb["EXPECTED VALUE"] = sb["TARGET"].apply(lambda t: (t / days_in_quarter) * hari_berjalan_kuartal if days_in_quarter else 0.0)
     sb["% PENCAPAIAN"] = sb.apply(lambda r: (r["OMSET S/D HARI INI"] / r["EXPECTED VALUE"]) if r["EXPECTED VALUE"] else None, axis=1)
 
     total_row = {
@@ -1457,7 +1488,15 @@ def build_scoreboard_corporate_manual(df_corp: pd.DataFrame, df_target: pd.DataF
 
     sum_ini = ini.groupby("Cabang")["Omset"].sum()
     sum_lalu = lalu.groupby("Cabang")["Omset"].sum()
-    branches = order_branches(set(sum_ini.index) | set(sum_lalu.index))
+
+    # Data Corporate hanya beresolusi bulanan (Tahun/Bulan, bukan tanggal harian), jadi
+    # kumulatif kuartal-berjalan dijumlah dari semua bulan sejak awal kuartal s/d bulan
+    # berjalan (tahun yang sama) - dipakai sebagai basis % Pencapaian terhadap target kuartal.
+    quarter_start, _ = _quarter_bounds(tanggal_acuan)
+    qtd = d[(d["Tahun"] == quarter_start.year) & (d["Bulan"] >= quarter_start.month) & (d["Bulan"] <= bulan_ini)]
+    sum_qtd = qtd.groupby("Cabang")["Omset"].sum()
+
+    branches = order_branches(set(sum_ini.index) | set(sum_lalu.index) | set(sum_qtd.index))
     hari_acuan = tanggal_acuan.day
     days_in_bulan_lalu = calendar.monthrange(tahun_lalu, bulan_lalu)[1]
     hari_lalu_cutoff = min(hari_acuan, days_in_bulan_lalu)
@@ -1465,9 +1504,10 @@ def build_scoreboard_corporate_manual(df_corp: pd.DataFrame, df_target: pd.DataF
     rows = []
     for b in branches:
         oi = float(sum_ini.get(b, 0.0))
+        oi_kuartal = float(sum_qtd.get(b, 0.0))
         ol = float(sum_lalu.get(b, 0.0))
         rows.append({
-            "CABANG": b, "OMSET BULAN LALU (FULL)": ol, "OMSET S/D HARI INI": oi,
+            "CABANG": b, "OMSET BULAN LALU (FULL)": ol, "OMSET S/D HARI INI": oi_kuartal,
             "OMSET BULAN LALU S/D HARI SAMA": ol,
             "PERIODE BULAN LALU": (ol / hari_lalu_cutoff) if hari_lalu_cutoff else 0.0,
             "PERIODE BULAN INI": (oi / hari_acuan) if hari_acuan else 0.0,
@@ -1866,7 +1906,8 @@ def compute_corp_hari_ini(corp_log: pd.DataFrame, tanggal_acuan: date) -> pd.Dat
 
 # --------------------------------------------------------------------------------------
 # Loader Target manual (dipakai kalau file yang diupload tidak punya kolom TARGET
-# di sheet Scoreboard)
+# di sheet Scoreboard). Nilai TARGET yang diinput di sini juga diasumsikan sebagai total
+# 1 KUARTAL PENUH (3 bulan), sama seperti target yang diekstrak otomatis dari file Excel.
 # --------------------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
@@ -1893,11 +1934,20 @@ def make_target_template() -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Target"
-    ws.append(["Cabang", "Target Service", "Target Gadget", "Target All", "Target Corporate"])
+    ws.append(["Cabang", "Target Service (per kuartal)", "Target Gadget (per kuartal)", "Target All (per kuartal)", "Target Corporate (per kuartal)"])
     for b in BRANCH_ORDER[:3]:
-        ws.append([b, 50000000, 60000000, 110000000, 15000000])
-    for col, w in zip("ABCDE", [16, 16, 16, 14, 18]):
+        ws.append([b, 150000000, 180000000, 330000000, 45000000])
+    for col, w in zip("ABCDE", [16, 22, 22, 20, 24]):
         ws.column_dimensions[col].width = w
+
+    info = wb.create_sheet("Petunjuk")
+    info.append(["Petunjuk pengisian Target"])
+    info.append([""])
+    info.append(["- Nilai target di sini adalah TOTAL untuk 1 KUARTAL PENUH (3 bulan), BUKAN target bulanan."])
+    info.append(["- Kuartal MFlash: Jan-Mar, Apr-Jun, Jul-Sep, Okt-Des."])
+    info.append(["- Dashboard otomatis membagi target ini dengan jumlah hari di kuartal berjalan untuk"])
+    info.append(["  menghitung Expected Value & % Pencapaian harian."])
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -2023,7 +2073,7 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**4️⃣ Target (opsional)**")
-    st.caption("Hanya perlu diupload kalau file Omset tidak punya kolom TARGET di sheet Scoreboard.")
+    st.caption("Hanya perlu diupload kalau file Omset tidak punya kolom TARGET di sheet Scoreboard. Nilai target adalah total per KUARTAL (3 bulan), bukan bulanan.")
     target_file = st.file_uploader("Upload file Target", type=["xlsx"], key="upl_target")
     if target_file:
         fpath = TARGET_DATA_PATH
