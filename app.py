@@ -5,7 +5,9 @@ Fitur utama:
 - Tab Ringkasan, Scoreboard, Iklan, Walk-in
 - Auto-deteksi 2 format file Omset utama: file master (sheet Faktur Penjualan +
   Scoreboard) ATAU file per-cabang "Rincian Faktur Penjualan" (bisa banyak file sekaligus)
-- Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet Scoreboard (kalau ada)
+- Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet Scoreboard (kalau ada),
+  dengan fallback ke file Target manual yang diupload - file manual DIPRIORITASKAN kalau
+  auto-ekstrak gagal menemukan angka target yang valid (lihat _has_target_signal())
 - Target MFlash berlaku per KUARTAL (Jan-Mar/Apr-Jun/Jul-Sep/Okt-Des), % Pencapaian
   dihitung kumulatif sejak awal kuartal s/d tanggal acuan (bukan per bulan)
 - Insight & Rekomendasi Perbaikan yang dikelompokkan rapi per kategori, dengan rencana
@@ -1695,6 +1697,19 @@ def _empty_target_df() -> pd.DataFrame:
     return pd.DataFrame(columns=_TARGET_DF_COLUMNS)
 
 
+def _has_target_signal(df: pd.DataFrame) -> bool:
+    """True kalau df target punya minimal satu angka target > 0 di salah satu kolom
+    (TargetService/TargetGadget/TargetAll/TargetCorp). Dipakai untuk membedakan hasil
+    auto-ekstrak yang BENERAN nemu target vs yang cuma nemu baris CABANG kosong (0 semua) -
+    supaya file Target manual yang diupload user tidak diabaikan begitu saja."""
+    if df is None or df.empty:
+        return False
+    numeric_cols = [c for c in _TARGET_DF_COLUMNS if c != "CABANG" and c in df.columns]
+    if not numeric_cols:
+        return False
+    return bool(df[numeric_cols].fillna(0).to_numpy().sum() > 0)
+
+
 def _read_scoreboard_sections(wb):
     """Cari sheet 'Scoreboard' dan kembalikan dict {section_key: list of rows (as tuples)}
     berdasarkan header section 'SCOREBOARD OMSET SERVICE/GADGET.../MARKETING CORPORATE'."""
@@ -2078,7 +2093,7 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**4️⃣ Target (opsional)**")
-    st.caption("Hanya perlu diupload kalau file Omset tidak punya kolom TARGET di sheet Scoreboard. Nilai target adalah total per KUARTAL (3 bulan), bukan bulanan.")
+    st.caption("Hanya perlu diupload kalau file Omset tidak punya kolom TARGET di sheet Scoreboard. Nilai target adalah total per KUARTAL (3 bulan), bukan bulanan. File yang diupload di sini SELALU diprioritaskan kalau isinya ada angka target.")
     target_file = st.file_uploader("Upload file Target", type=["xlsx"], key="upl_target")
     if target_file:
         fpath = TARGET_DATA_PATH
@@ -2120,15 +2135,28 @@ if _all_errors:
             st.caption(e)
 
 # ---------------------------- Resolusi Target & Scoreboard Corporate ----------------------------
-df_target = extract_scoreboard_target_all(MAIN_DATA_DIR)
-corp_scoreboard_df, corp_scoreboard_tanggal = extract_scoreboard_corporate_all(MAIN_DATA_DIR)
+# Prioritas TARGET: file manual yang diupload user (kalau isinya beneran ada angka target)
+# SELALU menang dibanding hasil auto-ekstrak dari sheet Scoreboard - supaya auto-ekstrak
+# yang "nemu" baris CABANG tapi gagal membaca kolom TARGET (jadi 0 semua) tidak diam-diam
+# menutupi/mengabaikan target manual yang sudah user upload dengan benar.
+df_target_auto = extract_scoreboard_target_all(MAIN_DATA_DIR)
 
-if df_target.empty and os.path.exists(TARGET_DATA_PATH):
+df_target_manual = _empty_target_df()
+if os.path.exists(TARGET_DATA_PATH):
     try:
         with open(TARGET_DATA_PATH, "rb") as f:
-            df_target = load_target_data(f.read())
+            df_target_manual = load_target_data(f.read())
     except Exception:  # noqa: BLE001
-        df_target = _empty_target_df()
+        df_target_manual = _empty_target_df()
+
+if _has_target_signal(df_target_manual):
+    df_target = df_target_manual
+elif _has_target_signal(df_target_auto):
+    df_target = df_target_auto
+else:
+    df_target = _empty_target_df()
+
+corp_scoreboard_df, corp_scoreboard_tanggal = extract_scoreboard_corporate_all(MAIN_DATA_DIR)
 
 df_corp_manual = pd.DataFrame()
 if os.path.exists(CORPORATE_DATA_PATH):
@@ -2140,9 +2168,17 @@ if os.path.exists(CORPORATE_DATA_PATH):
 
 df_corp = corp_scoreboard_df if not corp_scoreboard_df.empty else df_corp_manual
 
+# PENTING: dashboard TIDAK boleh berhenti render total (st.stop()) hanya karena data
+# Omset belum ada - kalau user cuma upload Walk-in/Iklan/Corporate dulu, tab-tab lain
+# (Iklan, Walk-in) harus tetap bisa dipakai. Tab Ringkasan & Scoreboard yang memang
+# tergantung data Omset akan menampilkan status kosong secara wajar (sudah ditangani
+# masing-masing lewat pengecekan .empty di dalam tab), bukan menghentikan seluruh app.
 if df_main.empty:
-    st.info("👈 Silakan upload file data Omset di sidebar untuk mulai menggunakan dashboard.")
-    st.stop()
+    st.info(
+        "ℹ️ Data Omset belum diupload — tab **Ringkasan** & **Scoreboard** akan kosong "
+        "sampai file Omset diupload di sidebar. Tab **Iklan** & **Walk-in** tetap bisa "
+        "dipakai kalau datanya sudah diupload."
+    )
 
 # ---------------------------- Ledger permanen ----------------------------
 build_upload_log(df_main)
@@ -2154,16 +2190,37 @@ corp_history_log = _read_log(CORP_HISTORY_LOG_PATH, _CORP_HISTORY_LOG_COLUMNS)
 st.markdown("---")
 f1, f2 = st.columns([1, 2])
 with f1:
-    max_date = df_main["Tanggal"].max().date() if not df_main.empty else date.today()
+    if not df_main.empty:
+        max_date = df_main["Tanggal"].max().date()
+    elif not df_walkin.empty:
+        max_date = df_walkin["Tanggal"].max().date()
+    else:
+        max_date = date.today()
     tanggal_acuan = st.date_input("Tanggal Acuan", value=max_date, key="tanggal_acuan")
 with f2:
-    all_branches = order_branches(df_main["Cabang"].dropna().unique().tolist())
+    # Gabungkan opsi cabang dari SEMUA sumber data (Omset/Iklan/Walk-in/Corporate) -
+    # bukan cuma df_main - supaya filter cabang tetap berfungsi walau data Omset belum
+    # diupload sama sekali (mis. user baru upload Walk-in atau Iklan duluan).
+    branch_pool = set()
+    if not df_main.empty:
+        branch_pool |= set(df_main["Cabang"].dropna().unique().tolist())
+    if not df_ads.empty:
+        branch_pool |= set(df_ads["Cabang"].dropna().unique().tolist())
+    if not df_walkin.empty:
+        branch_pool |= set(df_walkin["Cabang"].dropna().unique().tolist())
+    if df_corp is not None and not df_corp.empty and "Cabang" in df_corp.columns:
+        branch_pool |= set(df_corp["Cabang"].dropna().unique().tolist())
+    all_branches = order_branches(branch_pool)
     selected_branches = st.multiselect("Filter Cabang (kosongkan = semua)", options=all_branches, default=[], key="filter_cabang")
 
 selected_branches = selected_branches or None
 periode_label = f"{BULAN_ID[tanggal_acuan.month - 1]} {tanggal_acuan.year} (s/d tanggal {tanggal_acuan.day})"
 
-df_main_f = df_main[df_main["Cabang"].isin(selected_branches)] if selected_branches else df_main
+# Guard dengan `not df_x.empty` di semua baris (bukan cuma ads/walkin) - kalau data Omset
+# belum diupload, df_main benar-benar kosong (0 kolom), jadi df_main["Cabang"] akan error
+# (KeyError) kalau tidak dijaga, terutama saat user memilih cabang dari data Iklan/Walk-in
+# yang sudah ada duluan.
+df_main_f = df_main[df_main["Cabang"].isin(selected_branches)] if selected_branches and not df_main.empty else df_main
 df_ads_f = df_ads[df_ads["Cabang"].isin(selected_branches)] if selected_branches and not df_ads.empty else df_ads
 df_walkin_f = df_walkin[df_walkin["Cabang"].isin(selected_branches)] if selected_branches and not df_walkin.empty else df_walkin
 
