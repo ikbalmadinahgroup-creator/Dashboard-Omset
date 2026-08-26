@@ -1,10 +1,12 @@
-"""Dashboard Omset MFlash - Streamlit dashboard untuk monitoring Omset, Iklan & Walk-in
-18 cabang MFlash.
+"""Dashboard Omset MFlash - Streamlit dashboard untuk monitoring Omset, Iklan, Walk-in,
+dan 6 Pilar MFlash, 18 cabang MFlash.
 
 Fitur utama:
-- Tab Ringkasan, Scoreboard, Iklan, Walk-in
+- Tab Ringkasan, Scoreboard, Iklan, Walk-in, 6 Pilar
 - Auto-deteksi 2 format file Omset utama: file master (sheet Faktur Penjualan +
   Scoreboard) ATAU file per-cabang "Rincian Faktur Penjualan" (bisa banyak file sekaligus)
+- 6 Pilar MFlash: klasifikasi omset dari kolom "KATEGORI PILAR Sales Invoice" yang HANYA
+  ada di file per-cabang (Rincian Faktur Penjualan), tidak ada di file master lama
 - Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet Scoreboard (kalau ada),
   dengan fallback ke file Target manual yang diupload - file manual DIPRIORITASKAN kalau
   auto-ekstrak gagal menemukan angka target yang valid (lihat _has_target_signal())
@@ -17,6 +19,8 @@ Fitur utama:
   meski file lama diganti/dihapus
 - Auto-backup semua file yang diupload ke repo GitHub (opsional, lihat README) supaya
   data tidak hilang saat app di Streamlit Community Cloud sleep/restart/redeploy
+- Dashboard TIDAK berhenti render total kalau data Omset belum diupload - tab Iklan &
+  Walk-in tetap bisa dipakai independen
 """
 
 import base64
@@ -359,6 +363,60 @@ def classify_kategori(kategori_barang: str) -> str:
     return "Gadget & Aksesoris"
 
 
+# --------------------------------------------------------------------------------------
+# 6 Pilar MFlash - klasifikasi dari kolom "KATEGORI PILAR Sales Invoice" yang HANYA ada
+# di file per-cabang (Rincian Faktur Penjualan). File master lama tidak punya kolom ini,
+# jadi omset dari file master akan otomatis masuk "Belum Dikategorikan".
+# --------------------------------------------------------------------------------------
+
+PILAR_ORDER = [
+    "1. Service", "2. Penjualan Ritel", "3. Pengadaan Corporate",
+    "4. Penyewaan Corporate", "5. Maintenance Corporate", "6. Internet & Connectivity",
+    "Cicilan Syariah", "Belum Dikategorikan",
+]
+PILAR_ICONS = {
+    "1. Service": "🛠️", "2. Penjualan Ritel": "📱", "3. Pengadaan Corporate": "🏢",
+    "4. Penyewaan Corporate": "📦", "5. Maintenance Corporate": "🔧",
+    "6. Internet & Connectivity": "📶", "Cicilan Syariah": "🕌", "Belum Dikategorikan": "❓",
+}
+PILAR_COLORS = {
+    "1. Service": "#0f766e", "2. Penjualan Ritel": "#6d28d9", "3. Pengadaan Corporate": "#1d4ed8",
+    "4. Penyewaan Corporate": "#b45309", "5. Maintenance Corporate": "#0891b2",
+    "6. Internet & Connectivity": "#65a30d", "Cicilan Syariah": "#be185d", "Belum Dikategorikan": "#9ca3af",
+}
+
+
+def _pilar_label(p: str) -> str:
+    return p.split(". ", 1)[-1] if ". " in p else p
+
+
+def classify_pilar(raw_value) -> str:
+    """Klasifikasi nilai kolom KATEGORI PILAR Sales Invoice ke salah satu dari 6 Pilar
+    resmi MFlash, plus 2 kategori tambahan: 'Cicilan Syariah' (kadang tercatat di kolom
+    ini sebagai metode pembayaran) dan 'Belum Dikategorikan' (kosong/tidak dikenali/file
+    tidak punya kolom ini sama sekali)."""
+    if raw_value is None:
+        return "Belum Dikategorikan"
+    v = str(raw_value).strip().upper()
+    if not v:
+        return "Belum Dikategorikan"
+    if "CICILAN" in v:
+        return "Cicilan Syariah"
+    if "SERVICE" in v:
+        return "1. Service"
+    if "RITEL" in v or "RETAIL" in v:
+        return "2. Penjualan Ritel"
+    if "PENGADAAN" in v:
+        return "3. Pengadaan Corporate"
+    if "PENYEWAAN" in v or "SEWA" in v:
+        return "4. Penyewaan Corporate"
+    if "MAINTENANCE" in v or "PERAWATAN" in v:
+        return "5. Maintenance Corporate"
+    if "INTERNET" in v or "WIFI" in v or "CONNECTIVITY" in v:
+        return "6. Internet & Connectivity"
+    return "Belum Dikategorikan"
+
+
 def parse_bulan(v):
     if v is None:
         return None
@@ -393,13 +451,16 @@ def to_date(v):
 # Loader data Omset utama - mendukung DUA format:
 # 1) Format lama (file master): sheet "Faktur Penjualan" + kolom CABANG, dibaca streaming
 #    (read_only=True) untuk performa karena filenya besar (puluhan MB, semua cabang).
+#    Format ini TIDAK punya kolom KATEGORI PILAR -> semua barisnya "Belum Dikategorikan".
 # 2) Format baru (per cabang): sheet "Rincian Faktur Penjualan", TIDAK ada kolom CABANG
 #    (cabang diambil dari nama file), dan filenya punya bug tag <dimension> yang salah
 #    (cuma mendeklarasikan 1 sel) sehingga read_only=True gagal membaca semua baris -
-#    harus di-parse penuh (bukan streaming).
+#    harus di-parse penuh (bukan streaming). Format ini PUNYA kolom KATEGORI PILAR Sales
+#    Invoice (opsional, tidak wajib ada, dan sering kosong per baris).
 # --------------------------------------------------------------------------------------
 
 _FAKTUR_REQUIRED_COLS = ["TGL FAKTUR", "KATEGORI BARANG", "TOTAL HARGA"]
+_PILAR_COLUMN_NAME = "KATEGORI PILAR SALES INVOICE"
 
 
 def _find_data_sheet(wb):
@@ -435,6 +496,7 @@ def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
     tgl_idx = col_idx["TGL FAKTUR"]
     barang_idx = col_idx["KATEGORI BARANG"]
     total_idx = col_idx["TOTAL HARGA"]
+    pilar_idx = col_idx.get(_PILAR_COLUMN_NAME)
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         if tgl_idx >= len(row) or barang_idx >= len(row) or total_idx >= len(row):
@@ -450,9 +512,11 @@ def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
             total = float(total)
         except (TypeError, ValueError):
             continue
+        pilar_raw = row[pilar_idx] if (pilar_idx is not None and pilar_idx < len(row)) else None
         rows.append({
             "Cabang": branch, "Tanggal": pd.Timestamp(tgl.date()), "Tahun": tgl.year, "Bulan": tgl.month,
-            "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total, "SumberFile": filename_hint,
+            "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total,
+            "Pilar": classify_pilar(pilar_raw), "SumberFile": filename_hint,
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -462,11 +526,14 @@ def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
 
 
 def _load_master_sheet(ws, col_idx, filename_hint: str) -> pd.DataFrame:
-    """Baca sheet format lama secara streaming (ws sudah dibuka read_only=True)."""
+    """Baca sheet format lama secara streaming (ws sudah dibuka read_only=True). Format ini
+    tidak pernah punya kolom KATEGORI PILAR, tapi tetap dicek (col_idx.get) untuk berjaga-
+    jaga kalau suatu saat kolom itu ditambahkan ke file master juga."""
     cabang_idx = col_idx["CABANG"]
     tgl_idx = col_idx["TGL FAKTUR"]
     barang_idx = col_idx["KATEGORI BARANG"]
     total_idx = col_idx["TOTAL HARGA"]
+    pilar_idx = col_idx.get(_PILAR_COLUMN_NAME)
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         max_idx = max(cabang_idx, tgl_idx, barang_idx, total_idx)
@@ -485,9 +552,11 @@ def _load_master_sheet(ws, col_idx, filename_hint: str) -> pd.DataFrame:
         except (TypeError, ValueError):
             continue
         cabang_norm = str(cabang).strip().upper()
+        pilar_raw = row[pilar_idx] if (pilar_idx is not None and pilar_idx < len(row)) else None
         rows.append({
             "Cabang": cabang_norm, "Tanggal": pd.Timestamp(tgl.date()), "Tahun": tgl.year, "Bulan": tgl.month,
-            "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total, "SumberFile": filename_hint,
+            "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total,
+            "Pilar": classify_pilar(pilar_raw), "SumberFile": filename_hint,
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -1685,6 +1754,153 @@ def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: st
 
 
 # --------------------------------------------------------------------------------------
+# Agregasi & rendering untuk tab 6 Pilar MFlash
+# --------------------------------------------------------------------------------------
+
+def build_pilar_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    """Omset per Pilar bulan berjalan (s/d tanggal acuan) vs bulan lalu (s/d tanggal yang
+    sama), dipakai untuk KPI card & indikator tren naik/turun per pilar."""
+    empty = pd.DataFrame(columns=["Pilar", "OmsetBulanIni", "OmsetBulanLalu", "PctChange"])
+    if df is None or df.empty or "Pilar" not in df.columns:
+        return empty
+    d = df.copy()
+    if selected_branches:
+        d = d[d["Cabang"].isin(selected_branches)]
+    if d.empty:
+        return empty
+
+    tahun_ini, bulan_ini = tanggal_acuan.year, tanggal_acuan.month
+    if bulan_ini == 1:
+        tahun_lalu, bulan_lalu = tahun_ini - 1, 12
+    else:
+        tahun_lalu, bulan_lalu = tahun_ini, bulan_ini - 1
+    hari_acuan = tanggal_acuan.day
+    days_in_bulan_lalu = calendar.monthrange(tahun_lalu, bulan_lalu)[1]
+    hari_lalu_cutoff = min(hari_acuan, days_in_bulan_lalu)
+
+    ini = d[(d["Tahun"] == tahun_ini) & (d["Bulan"] == bulan_ini) & (d["Tanggal"].dt.day <= hari_acuan)]
+    lalu = d[(d["Tahun"] == tahun_lalu) & (d["Bulan"] == bulan_lalu) & (d["Tanggal"].dt.day <= hari_lalu_cutoff)]
+
+    sum_ini = ini.groupby("Pilar")["Omset"].sum()
+    sum_lalu = lalu.groupby("Pilar")["Omset"].sum()
+
+    rows = []
+    for p in PILAR_ORDER:
+        oi = float(sum_ini.get(p, 0.0))
+        ol = float(sum_lalu.get(p, 0.0))
+        pct = ((oi - ol) / ol) if ol else None
+        rows.append({"Pilar": p, "OmsetBulanIni": oi, "OmsetBulanLalu": ol, "PctChange": pct})
+    return pd.DataFrame(rows)
+
+
+def build_pilar_by_branch(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    """Cross-tab Cabang x Pilar untuk omset bulan berjalan (s/d tanggal acuan), plus baris
+    & kolom TOTAL."""
+    if df is None or df.empty or "Pilar" not in df.columns:
+        return pd.DataFrame()
+    d = df.copy()
+    if selected_branches:
+        d = d[d["Cabang"].isin(selected_branches)]
+    tahun_ini, bulan_ini, hari_acuan = tanggal_acuan.year, tanggal_acuan.month, tanggal_acuan.day
+    d = d[(d["Tahun"] == tahun_ini) & (d["Bulan"] == bulan_ini) & (d["Tanggal"].dt.day <= hari_acuan)]
+    if d.empty:
+        return pd.DataFrame()
+
+    pivot = d.pivot_table(index="Cabang", columns="Pilar", values="Omset", aggfunc="sum", fill_value=0.0)
+    for p in PILAR_ORDER:
+        if p not in pivot.columns:
+            pivot[p] = 0.0
+    pivot = pivot[PILAR_ORDER]
+    pivot["TOTAL"] = pivot.sum(axis=1)
+    pivot = pivot.reset_index()
+
+    branches_present = order_branches(pivot["Cabang"].tolist())
+    pivot["Cabang"] = pd.Categorical(pivot["Cabang"], categories=branches_present, ordered=True)
+    pivot = pivot.sort_values("Cabang").reset_index(drop=True)
+    pivot["Cabang"] = pivot["Cabang"].astype(str)
+
+    total_row = {"Cabang": "TOTAL"}
+    for p in PILAR_ORDER + ["TOTAL"]:
+        total_row[p] = pivot[p].sum()
+    pivot = pd.concat([pivot, pd.DataFrame([total_row])], ignore_index=True)
+    return pivot
+
+
+def generate_pilar_insights(pilar_by_branch: pd.DataFrame) -> list:
+    """Insight kualitas data: tandai cabang dengan porsi omset 'Belum Dikategorikan' yang
+    tinggi (>= 40% dari total omset cabang tsb) supaya diingatkan mengisi kolom KATEGORI
+    PILAR Sales Invoice dengan lebih rapi di faktur penjualan."""
+    insights = []
+    if pilar_by_branch.empty or "Belum Dikategorikan" not in pilar_by_branch.columns:
+        return insights
+    rows = pilar_by_branch[pilar_by_branch["Cabang"] != "TOTAL"]
+    for _, r in rows.iterrows():
+        total = r.get("TOTAL", 0.0)
+        if not total:
+            continue
+        belum = r.get("Belum Dikategorikan", 0.0)
+        pct = belum / total
+        if pct >= 0.4:
+            insights.append({
+                "level": "warn" if pct < 0.7 else "bad",
+                "title": str(r["Cabang"]),
+                "text": f"{format_percent(pct)} dari omset cabang ini ({format_rupiah(belum)} dari "
+                        f"{format_rupiah(total)}) belum diberi kategori di kolom KATEGORI PILAR Sales "
+                        f"Invoice. Ingatkan admin cabang untuk mengisi kolom ini di setiap transaksi "
+                        f"supaya data 6 Pilar akurat.",
+            })
+    return insights
+
+
+def render_pilar_kpi_card(pilar: str, value: float, pct_change) -> str:
+    color = PILAR_COLORS.get(pilar, "#374151")
+    icon = PILAR_ICONS.get(pilar, "📊")
+    trend_html = ""
+    if pct_change is not None and not pd.isna(pct_change):
+        arrow = "▲" if pct_change >= 0 else "▼"
+        trend_html = (
+            f'<div style="font-size:11.5px;margin-top:4px;opacity:.9;">{arrow} '
+            f'{format_percent(abs(pct_change))} vs bulan lalu</div>'
+        )
+    label = _pilar_label(pilar)
+    return f"""
+    <div style="background:{color};border-radius:14px;padding:14px 16px;color:white;
+                box-shadow:0 2px 8px rgba(0,0,0,.12);height:100%;">
+      <div style="font-size:22px;line-height:1;">{icon}</div>
+      <div style="font-size:12px;opacity:.9;margin-top:6px;">{label}</div>
+      <div style="font-size:17px;font-weight:700;margin-top:2px;">{format_rupiah(value)}</div>
+      {trend_html}
+    </div>
+    """
+
+
+def render_pilar_table_html(pilar_by_branch: pd.DataFrame) -> str:
+    if pilar_by_branch.empty:
+        return "<p>Tidak ada data untuk periode ini.</p>"
+    display_cols = ["Cabang"] + [p for p in PILAR_ORDER if p in pilar_by_branch.columns] + ["TOTAL"]
+    header_html = "".join(
+        f'<th style="padding:8px 10px;text-align:{"left" if c == "Cabang" else "right"};'
+        f'background:#1e3a8a;color:white;font-size:11px;white-space:nowrap;position:sticky;top:0;">'
+        f'{c if c in ("Cabang", "TOTAL") else _pilar_label(c)}</th>'
+        for c in display_cols
+    )
+    rows_html = ""
+    for _, r in pilar_by_branch.iterrows():
+        is_total = r["Cabang"] == "TOTAL"
+        bg = "#eff6ff" if is_total else "#ffffff"
+        fw = "700" if is_total else "400"
+        cells = f'<td style="padding:7px 10px;font-weight:{fw};background:{bg};position:sticky;left:0;">{r["Cabang"]}</td>'
+        for c in display_cols[1:]:
+            cells += f'<td style="padding:7px 10px;text-align:right;font-weight:{fw};background:{bg};">{format_rupiah(r.get(c, 0))}</td>'
+        rows_html += f"<tr>{cells}</tr>"
+    return (
+        '<div style="overflow-x:auto;max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;">'
+        f'<table style="border-collapse:collapse;width:100%;font-size:12px;">'
+        f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}</tbody></table></div>"
+    )
+
+
+# --------------------------------------------------------------------------------------
 # Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet "Scoreboard" (kalau ada)
 # --------------------------------------------------------------------------------------
 
@@ -1993,14 +2209,18 @@ with logo_col:
         st.image(io.BytesIO(base64.b64decode(LOGO_BASE64)), width=90)
 with title_col:
     st.markdown("## Dashboard Omset MFlash")
-    st.caption("Monitoring Omset, Iklan & Walk-in — 18 Cabang")
+    st.caption("Monitoring Omset, Iklan, Walk-in & 6 Pilar — 18 Cabang")
 
 # ---------------------------- Sidebar: Kelola Data ----------------------------
 with st.sidebar:
     st.markdown("### 📂 Kelola Data")
 
     st.markdown("**1️⃣ Data Omset Utama**")
-    st.caption("File master (Faktur Penjualan) ATAU file per-cabang (Rincian Faktur Penjualan).")
+    st.caption(
+        "File master (Faktur Penjualan) ATAU file per-cabang (Rincian Faktur Penjualan). "
+        "Khusus untuk tab 6 Pilar, gunakan file per-cabang (Rincian Faktur Penjualan) karena "
+        "file master lama tidak punya kolom KATEGORI PILAR."
+    )
     main_files = st.file_uploader(
         "Upload file Omset", type=["xlsx"], accept_multiple_files=True, key="upl_main",
     )
@@ -2170,13 +2390,14 @@ df_corp = corp_scoreboard_df if not corp_scoreboard_df.empty else df_corp_manual
 
 # PENTING: dashboard TIDAK boleh berhenti render total (st.stop()) hanya karena data
 # Omset belum ada - kalau user cuma upload Walk-in/Iklan/Corporate dulu, tab-tab lain
-# (Iklan, Walk-in) harus tetap bisa dipakai. Tab Ringkasan & Scoreboard yang memang
-# tergantung data Omset akan menampilkan status kosong secara wajar (sudah ditangani
-# masing-masing lewat pengecekan .empty di dalam tab), bukan menghentikan seluruh app.
+# (Iklan, Walk-in) harus tetap bisa dipakai. Tab Ringkasan, Scoreboard, & 6 Pilar yang
+# memang tergantung data Omset akan menampilkan status kosong secara wajar (sudah
+# ditangani masing-masing lewat pengecekan .empty di dalam tab), bukan menghentikan
+# seluruh app.
 if df_main.empty:
     st.info(
-        "ℹ️ Data Omset belum diupload — tab **Ringkasan** & **Scoreboard** akan kosong "
-        "sampai file Omset diupload di sidebar. Tab **Iklan** & **Walk-in** tetap bisa "
+        "ℹ️ Data Omset belum diupload — tab **Ringkasan**, **Scoreboard**, & **6 Pilar** akan "
+        "kosong sampai file Omset diupload di sidebar. Tab **Iklan** & **Walk-in** tetap bisa "
         "dipakai kalau datanya sudah diupload."
     )
 
@@ -2260,7 +2481,9 @@ omset_gadget_val = _sd_value(smm_gadget)
 omset_all_val = _sd_value(smm_all)
 omset_corp_val = _sd_value(smm_corp)
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Ringkasan", "🗂️ Scoreboard", "📣 Iklan", "🚶 Walk-in"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📊 Ringkasan", "🗂️ Scoreboard", "📣 Iklan", "🚶 Walk-in", "🏛️ 6 Pilar"]
+)
 
 # ==================================== TAB 1: RINGKASAN ====================================
 with tab1:
@@ -2411,6 +2634,76 @@ with tab4:
         else:
             for item in walkin_insights:
                 st.markdown(render_structured_insight_card(item), unsafe_allow_html=True)
+
+# ==================================== TAB 5: 6 PILAR ====================================
+with tab5:
+    st.markdown(f"#### 6 Pilar MFlash — {periode_label}")
+    st.caption(
+        "Berdasarkan kolom 'KATEGORI PILAR Sales Invoice' di file per-cabang (Rincian Faktur "
+        "Penjualan). File master lama tidak punya kolom ini, jadi omsetnya otomatis masuk "
+        "'Belum Dikategorikan'."
+    )
+    if df_main_f.empty or "Pilar" not in df_main_f.columns:
+        st.info("Belum ada data Omset untuk periode ini.")
+    else:
+        pilar_summary = build_pilar_summary(df_main_f, tanggal_acuan, selected_branches)
+        if pilar_summary.empty or pilar_summary["OmsetBulanIni"].sum() == 0:
+            st.info("Belum ada omset untuk periode ini.")
+        else:
+            st.markdown("**Omset per Pilar (Bulan Berjalan)**")
+            active_rows = [row for _, row in pilar_summary.iterrows()]
+            for start in range(0, len(active_rows), 4):
+                cols = st.columns(4)
+                for offset, row in enumerate(active_rows[start:start + 4]):
+                    with cols[offset]:
+                        st.markdown(
+                            render_pilar_kpi_card(row["Pilar"], row["OmsetBulanIni"], row["PctChange"]),
+                            unsafe_allow_html=True,
+                        )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("**Kontribusi per Pilar**")
+            pie_df = pilar_summary[pilar_summary["OmsetBulanIni"] > 0].copy()
+            if not pie_df.empty:
+                pie_df["Label"] = pie_df["Pilar"].apply(_pilar_label)
+                fig_pilar_pie = px.pie(
+                    pie_df, names="Label", values="OmsetBulanIni", hole=0.45,
+                    color="Pilar", color_discrete_map=PILAR_COLORS,
+                )
+                fig_pilar_pie.update_traces(textinfo="label+percent")
+                fig_pilar_pie.update_layout(height=360, margin=dict(l=10, r=10, t=20, b=10), showlegend=True)
+                st.plotly_chart(fig_pilar_pie, use_container_width=True, key="pilar_contribution_pie")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("**Omset per Cabang per Pilar (Bulan Berjalan)**")
+            pilar_by_branch = build_pilar_by_branch(df_main_f, tanggal_acuan, selected_branches)
+            if not pilar_by_branch.empty:
+                chart_df = pilar_by_branch[pilar_by_branch["Cabang"] != "TOTAL"]
+                fig_pilar_stack = go.Figure()
+                for p in PILAR_ORDER:
+                    if p in chart_df.columns and chart_df[p].sum() > 0:
+                        fig_pilar_stack.add_trace(go.Bar(
+                            name=_pilar_label(p), x=chart_df["Cabang"], y=chart_df[p],
+                            marker_color=PILAR_COLORS.get(p, "#6b7280"),
+                        ))
+                fig_pilar_stack.update_layout(
+                    barmode="stack", height=380, margin=dict(l=10, r=10, t=20, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                )
+                st.plotly_chart(fig_pilar_stack, use_container_width=True, key="pilar_stacked_by_branch")
+
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("**Tabel Detail Cabang x Pilar**")
+                st.markdown(render_pilar_table_html(pilar_by_branch), unsafe_allow_html=True)
+
+                st.markdown("---")
+                st.markdown("#### 📋 Insight Kualitas Data")
+                pilar_insights = generate_pilar_insights(pilar_by_branch)
+                if not pilar_insights:
+                    st.success("Semua cabang sudah cukup rapi mengisi KATEGORI PILAR di faktur penjualan.")
+                else:
+                    for ins in pilar_insights:
+                        st.markdown(render_insight_card(ins["title"], ins["text"], ins["level"]), unsafe_allow_html=True)
 
 # ==================================== EXPORT LAPORAN ====================================
 st.markdown("---")
