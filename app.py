@@ -10,7 +10,9 @@ Fitur utama:
   kolom ini TIDAK seragam antar file - kadang "KATEGORI PILAR Sales Invoice", kadang
   "KATEGORI PILAR Faktur Penjualan" - jadi dideteksi dengan cara mencari kolom mana pun
   yang diawali "KATEGORI PILAR", bukan exact match ke satu nama saja (lihat
-  _find_pilar_column_index()).
+  _find_pilar_column_index()). Setiap Pilar juga dilengkapi Gross Profit (TOTAL HARGA -
+  HARGA BELI, atau kolom GROSS PROFIT yang sudah dihitung di file master kalau ada) dan
+  Qty khusus untuk Pilar Penyewaan Corporate & Maintenance Corporate.
 - Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet Scoreboard (kalau ada),
   dengan fallback ke file Target manual yang diupload - file manual DIPRIORITASKAN kalau
   auto-ekstrak gagal menemukan angka target yang valid (lihat _has_target_signal())
@@ -394,6 +396,10 @@ PILAR_COLORS = {
     "6. Internet & Connectivity": "#65a30d", "Cicilan Syariah": "#be185d", "Belum Dikategorikan": "#9ca3af",
 }
 
+# Pilar yang perlu ditampilkan metrik Qty tambahan di KPI card (selain Omset & Gross
+# Profit yang berlaku untuk semua pilar) - sesuai permintaan eksplisit user.
+_PILAR_SHOW_QTY = {"4. Penyewaan Corporate", "5. Maintenance Corporate"}
+
 
 def _pilar_label(p: str) -> str:
     return p.split(". ", 1)[-1] if ". " in p else p
@@ -467,16 +473,31 @@ def to_date(v):
         return None
 
 
+def _to_float_or_none(v):
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 # --------------------------------------------------------------------------------------
 # Loader data Omset utama - mendukung DUA format:
 # 1) Format lama (file master): sheet "Faktur Penjualan" + kolom CABANG, dibaca streaming
 #    (read_only=True) untuk performa karena filenya besar (puluhan MB, semua cabang).
 #    Format ini TIDAK punya kolom KATEGORI PILAR -> semua barisnya "Belum Dikategorikan".
+#    Tapi format ini SUDAH punya kolom "GROSS PROFIT" yang dihitung sendiri, jadi dipakai
+#    langsung kalau ada (lebih akurat daripada dihitung ulang).
 # 2) Format baru (per cabang): sheet "Rincian Faktur Penjualan", TIDAK ada kolom CABANG
 #    (cabang diambil dari nama file), dan filenya punya bug tag <dimension> yang salah
 #    (cuma mendeklarasikan 1 sel) sehingga read_only=True gagal membaca semua baris -
 #    harus di-parse penuh (bukan streaming). Format ini PUNYA kolom KATEGORI PILAR
-#    (nama persisnya bervariasi, lihat _find_pilar_column_index()).
+#    (nama persisnya bervariasi, lihat _find_pilar_column_index()), tapi TIDAK ada kolom
+#    GROSS PROFIT siap pakai, jadi dihitung sendiri: GROSS PROFIT = TOTAL HARGA - HARGA
+#    BELI (sudah diverifikasi silang terhadap kolom GROSS PROFIT bawaan file master -
+#    HARGA BELI di kedua format adalah harga beli TOTAL per baris, BUKAN per unit, jadi
+#    tidak perlu dikalikan QTY lagi).
 # --------------------------------------------------------------------------------------
 
 _FAKTUR_REQUIRED_COLS = ["TGL FAKTUR", "KATEGORI BARANG", "TOTAL HARGA"]
@@ -498,6 +519,25 @@ def _find_data_sheet(wb):
         if all(c in col_idx for c in REQUIRED_COLUMNS):
             return ws, col_idx
     return None, None
+
+
+def _extract_qty_gp(row, col_idx: dict, total: float):
+    """Ambil Qty & Gross Profit dari satu baris. Prioritas Gross Profit: pakai kolom
+    'GROSS PROFIT' bawaan file kalau ada (file master), kalau tidak dihitung dari
+    TOTAL HARGA - HARGA BELI (HARGA BELI di file ini adalah total per baris, bukan
+    per unit, jadi tidak dikalikan Qty lagi)."""
+    qty_idx = col_idx.get("QTY")
+    hargabeli_idx = col_idx.get("HARGA BELI")
+    gp_idx = col_idx.get("GROSS PROFIT")
+
+    qty_val = _to_float_or_none(row[qty_idx]) if (qty_idx is not None and qty_idx < len(row)) else None
+    hargabeli_val = _to_float_or_none(row[hargabeli_idx]) if (hargabeli_idx is not None and hargabeli_idx < len(row)) else None
+    gp_val = _to_float_or_none(row[gp_idx]) if (gp_idx is not None and gp_idx < len(row)) else None
+
+    if gp_val is None:
+        gp_val = (total - hargabeli_val) if hargabeli_val is not None else 0.0
+
+    return (qty_val if qty_val is not None else 0.0), gp_val
 
 
 def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
@@ -532,10 +572,11 @@ def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
         except (TypeError, ValueError):
             continue
         pilar_raw = row[pilar_idx] if (pilar_idx is not None and pilar_idx < len(row)) else None
+        qty_val, gp_val = _extract_qty_gp(row, col_idx, total)
         rows.append({
             "Cabang": branch, "Tanggal": pd.Timestamp(tgl.date()), "Tahun": tgl.year, "Bulan": tgl.month,
             "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total,
-            "Pilar": classify_pilar(pilar_raw), "SumberFile": filename_hint,
+            "Pilar": classify_pilar(pilar_raw), "Qty": qty_val, "GrossProfit": gp_val, "SumberFile": filename_hint,
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -572,10 +613,11 @@ def _load_master_sheet(ws, col_idx, filename_hint: str) -> pd.DataFrame:
             continue
         cabang_norm = str(cabang).strip().upper()
         pilar_raw = row[pilar_idx] if (pilar_idx is not None and pilar_idx < len(row)) else None
+        qty_val, gp_val = _extract_qty_gp(row, col_idx, total)
         rows.append({
             "Cabang": cabang_norm, "Tanggal": pd.Timestamp(tgl.date()), "Tahun": tgl.year, "Bulan": tgl.month,
             "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total,
-            "Pilar": classify_pilar(pilar_raw), "SumberFile": filename_hint,
+            "Pilar": classify_pilar(pilar_raw), "Qty": qty_val, "GrossProfit": gp_val, "SumberFile": filename_hint,
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -1777,9 +1819,9 @@ def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: st
 # --------------------------------------------------------------------------------------
 
 def build_pilar_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    """Omset per Pilar bulan berjalan (s/d tanggal acuan) vs bulan lalu (s/d tanggal yang
-    sama), dipakai untuk KPI card & indikator tren naik/turun per pilar."""
-    empty = pd.DataFrame(columns=["Pilar", "OmsetBulanIni", "OmsetBulanLalu", "PctChange"])
+    """Omset, Gross Profit & Qty per Pilar bulan berjalan (s/d tanggal acuan) vs bulan lalu
+    (s/d tanggal yang sama), dipakai untuk KPI card & indikator tren naik/turun per pilar."""
+    empty = pd.DataFrame(columns=["Pilar", "OmsetBulanIni", "OmsetBulanLalu", "PctChange", "GrossProfitBulanIni", "QtyBulanIni"])
     if df is None or df.empty or "Pilar" not in df.columns:
         return empty
     d = df.copy()
@@ -1802,13 +1844,18 @@ def build_pilar_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches
 
     sum_ini = ini.groupby("Pilar")["Omset"].sum()
     sum_lalu = lalu.groupby("Pilar")["Omset"].sum()
+    gp_ini = ini.groupby("Pilar")["GrossProfit"].sum() if "GrossProfit" in ini.columns else pd.Series(dtype=float)
+    qty_ini = ini.groupby("Pilar")["Qty"].sum() if "Qty" in ini.columns else pd.Series(dtype=float)
 
     rows = []
     for p in PILAR_ORDER:
         oi = float(sum_ini.get(p, 0.0))
         ol = float(sum_lalu.get(p, 0.0))
         pct = ((oi - ol) / ol) if ol else None
-        rows.append({"Pilar": p, "OmsetBulanIni": oi, "OmsetBulanLalu": ol, "PctChange": pct})
+        rows.append({
+            "Pilar": p, "OmsetBulanIni": oi, "OmsetBulanLalu": ol, "PctChange": pct,
+            "GrossProfitBulanIni": float(gp_ini.get(p, 0.0)), "QtyBulanIni": float(qty_ini.get(p, 0.0)),
+        })
     return pd.DataFrame(rows)
 
 
@@ -1871,7 +1918,7 @@ def generate_pilar_insights(pilar_by_branch: pd.DataFrame) -> list:
     return insights
 
 
-def render_pilar_kpi_card(pilar: str, value: float, pct_change) -> str:
+def render_pilar_kpi_card(pilar: str, value: float, pct_change, gross_profit=None, qty=None) -> str:
     color = PILAR_COLORS.get(pilar, "#374151")
     icon = PILAR_ICONS.get(pilar, "📊")
     trend_html = ""
@@ -1881,6 +1928,19 @@ def render_pilar_kpi_card(pilar: str, value: float, pct_change) -> str:
             f'<div style="font-size:11.5px;margin-top:4px;opacity:.9;">{arrow} '
             f'{format_percent(abs(pct_change))} vs bulan lalu</div>'
         )
+    gp_html = ""
+    if gross_profit is not None:
+        margin_html = ""
+        if value:
+            margin_html = f" ({format_percent(gross_profit / value)})"
+        gp_html = (
+            f'<div style="font-size:11.5px;margin-top:6px;padding-top:6px;'
+            f'border-top:1px solid rgba(255,255,255,.25);opacity:.95;">'
+            f'💹 Gross Profit: {format_rupiah(gross_profit)}{margin_html}</div>'
+        )
+    qty_html = ""
+    if qty is not None:
+        qty_html = f'<div style="font-size:11.5px;margin-top:3px;opacity:.95;">📦 Qty: {format_number(qty)} unit</div>'
     label = _pilar_label(pilar)
     return f"""
     <div style="background:{color};border-radius:14px;padding:14px 16px;color:white;
@@ -1889,6 +1949,8 @@ def render_pilar_kpi_card(pilar: str, value: float, pct_change) -> str:
       <div style="font-size:12px;opacity:.9;margin-top:6px;">{label}</div>
       <div style="font-size:17px;font-weight:700;margin-top:2px;">{format_rupiah(value)}</div>
       {trend_html}
+      {gp_html}
+      {qty_html}
     </div>
     """
 
@@ -1915,6 +1977,40 @@ def render_pilar_table_html(pilar_by_branch: pd.DataFrame) -> str:
     return (
         '<div style="overflow-x:auto;max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;">'
         f'<table style="border-collapse:collapse;width:100%;font-size:12px;">'
+        f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}</tbody></table></div>"
+    )
+
+
+def render_pilar_summary_table_html(pilar_summary: pd.DataFrame) -> str:
+    """Tabel ringkas per Pilar: Omset, Gross Profit, Margin %, dan Qty (Qty relevan
+    terutama untuk Penyewaan Corporate & Maintenance Corporate, tapi ditampilkan untuk
+    semua pilar supaya konsisten)."""
+    if pilar_summary.empty:
+        return "<p>Tidak ada data untuk periode ini.</p>"
+    cols = ["Pilar", "Omset", "Gross Profit", "Margin %", "Qty"]
+    header_html = "".join(
+        f'<th style="padding:8px 10px;text-align:{"left" if c == "Pilar" else "right"};'
+        f'background:#1e3a8a;color:white;font-size:12px;">{c}</th>' for c in cols
+    )
+    rows_html = ""
+    for _, r in pilar_summary.iterrows():
+        omset = r["OmsetBulanIni"]
+        gp = r.get("GrossProfitBulanIni", 0.0)
+        qty = r.get("QtyBulanIni", 0.0)
+        margin = (gp / omset) if omset else None
+        show_qty = r["Pilar"] in _PILAR_SHOW_QTY
+        qty_text = format_number(qty) if show_qty else "-"
+        cells = (
+            f'<td style="padding:7px 10px;">{PILAR_ICONS.get(r["Pilar"], "")} {_pilar_label(r["Pilar"])}</td>'
+            f'<td style="padding:7px 10px;text-align:right;">{format_rupiah(omset)}</td>'
+            f'<td style="padding:7px 10px;text-align:right;">{format_rupiah(gp)}</td>'
+            f'<td style="padding:7px 10px;text-align:right;">{format_percent(margin) if margin is not None else "-"}</td>'
+            f'<td style="padding:7px 10px;text-align:right;">{qty_text}</td>'
+        )
+        rows_html += f"<tr>{cells}</tr>"
+    return (
+        '<div style="overflow-x:auto;border:1px solid #e5e7eb;border-radius:8px;">'
+        f'<table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
         f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}</tbody></table></div>"
     )
 
@@ -2660,7 +2756,8 @@ with tab5:
     st.caption(
         "Berdasarkan kolom KATEGORI PILAR di file per-cabang (Rincian Faktur Penjualan). "
         "File master lama tidak punya kolom ini, jadi omsetnya otomatis masuk "
-        "'Belum Dikategorikan'."
+        "'Belum Dikategorikan'. Setiap Pilar juga dilengkapi Gross Profit, dan Qty khusus "
+        "untuk Pilar Penyewaan Corporate & Maintenance Corporate."
     )
     if df_main_f.empty or "Pilar" not in df_main_f.columns:
         st.info("Belum ada data Omset untuk periode ini.")
@@ -2669,14 +2766,18 @@ with tab5:
         if pilar_summary.empty or pilar_summary["OmsetBulanIni"].sum() == 0:
             st.info("Belum ada omset untuk periode ini.")
         else:
-            st.markdown("**Omset per Pilar (Bulan Berjalan)**")
+            st.markdown("**Omset, Gross Profit & Qty per Pilar (Bulan Berjalan)**")
             active_rows = [row for _, row in pilar_summary.iterrows()]
             for start in range(0, len(active_rows), 4):
                 cols = st.columns(4)
                 for offset, row in enumerate(active_rows[start:start + 4]):
                     with cols[offset]:
+                        qty_to_show = row["QtyBulanIni"] if row["Pilar"] in _PILAR_SHOW_QTY else None
                         st.markdown(
-                            render_pilar_kpi_card(row["Pilar"], row["OmsetBulanIni"], row["PctChange"]),
+                            render_pilar_kpi_card(
+                                row["Pilar"], row["OmsetBulanIni"], row["PctChange"],
+                                gross_profit=row["GrossProfitBulanIni"], qty=qty_to_show,
+                            ),
                             unsafe_allow_html=True,
                         )
 
@@ -2692,6 +2793,10 @@ with tab5:
                 fig_pilar_pie.update_traces(textinfo="label+percent")
                 fig_pilar_pie.update_layout(height=360, margin=dict(l=10, r=10, t=20, b=10), showlegend=True)
                 st.plotly_chart(fig_pilar_pie, use_container_width=True, key="pilar_contribution_pie")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("**Ringkasan Omset, Gross Profit & Qty per Pilar**")
+            st.markdown(render_pilar_summary_table_html(pilar_summary), unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("**Omset per Cabang per Pilar (Bulan Berjalan)**")
@@ -2712,7 +2817,7 @@ with tab5:
                 st.plotly_chart(fig_pilar_stack, use_container_width=True, key="pilar_stacked_by_branch")
 
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown("**Tabel Detail Cabang x Pilar**")
+                st.markdown("**Tabel Detail Cabang x Pilar (Omset)**")
                 st.markdown(render_pilar_table_html(pilar_by_branch), unsafe_allow_html=True)
 
                 st.markdown("---")
