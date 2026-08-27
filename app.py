@@ -1178,6 +1178,48 @@ def aggregate_walkin_monthly(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["Tahun", "Bulan", "Cabang"]).reset_index(drop=True)
 
 
+def render_walkin_table_html(latest_agg: pd.DataFrame) -> str:
+    """Tabel ringkas jumlah & rata-rata walk-in per cabang untuk bulan berjalan, diurutkan
+    sesuai BRANCH_ORDER, dengan baris TOTAL di bagian bawah (rata-rata TOTAL dihitung
+    weighted: total walk-in semua cabang / total hari efektif, konsisten dengan metrik
+    'Rata-rata Walk-in / Hari' yang sudah ditampilkan di atas tabel)."""
+    if latest_agg.empty:
+        return "<p>Tidak ada data untuk periode ini.</p>"
+    d = latest_agg.copy()
+    branches_present = order_branches(d["Cabang"].tolist())
+    d["Cabang"] = pd.Categorical(d["Cabang"], categories=branches_present, ordered=True)
+    d = d.sort_values("Cabang").reset_index(drop=True)
+    d["Cabang"] = d["Cabang"].astype(str)
+
+    header_html = (
+        '<th style="padding:8px 10px;text-align:left;background:#0f766e;color:white;font-size:12px;">CABANG</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#0f766e;color:white;font-size:12px;">TOTAL WALK-IN</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#0f766e;color:white;font-size:12px;">RATA-RATA / HARI</th>'
+    )
+    rows_html = ""
+    for _, r in d.iterrows():
+        rows_html += (
+            f'<tr><td style="padding:7px 10px;">{r["Cabang"]}</td>'
+            f'<td style="padding:7px 10px;text-align:right;">{format_number(r["TotalWalkin"])}</td>'
+            f'<td style="padding:7px 10px;text-align:right;">{format_decimal(r["RataRataPerHari"])}</td></tr>'
+        )
+
+    total_walkin_sum = d["TotalWalkin"].sum()
+    total_hari_sum = d["HariEfektif"].sum()
+    total_rata2 = (total_walkin_sum / total_hari_sum) if total_hari_sum else 0.0
+    total_row_html = (
+        '<tr style="background:#f0fdfa;">'
+        '<td style="padding:7px 10px;font-weight:700;">TOTAL</td>'
+        f'<td style="padding:7px 10px;text-align:right;font-weight:700;">{format_number(total_walkin_sum)}</td>'
+        f'<td style="padding:7px 10px;text-align:right;font-weight:700;">{format_decimal(total_rata2)}</td></tr>'
+    )
+    return (
+        '<div style="overflow-x:auto;max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;">'
+        f'<table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
+        f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}{total_row_html}</tbody></table></div>"
+    )
+
+
 _WALKIN_ACTION_PLAN = {
     "online": [
         "aktifkan promo/booking servis online (WhatsApp/Instagram) supaya calon customer bisa reservasi "
@@ -2729,6 +2771,10 @@ with tab4:
             fig_walkin = px.bar(latest_agg, x="Cabang", y="TotalWalkin", text_auto=True, color_discrete_sequence=["#0f766e"])
             fig_walkin.update_layout(height=300, margin=dict(l=10, r=10, t=20, b=10))
             st.plotly_chart(fig_walkin, use_container_width=True, key="walkin_by_branch")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("**Tabel Jumlah & Rata-rata Walk-in per Cabang (Bulan Berjalan)**")
+            st.markdown(render_walkin_table_html(latest_agg), unsafe_allow_html=True)
 
         walkin_insights = generate_walkin_insights(walkin_agg)
         st.markdown("---")
