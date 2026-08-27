@@ -5,6 +5,13 @@ Fitur utama:
 - Tab Ringkasan, Scoreboard, Iklan, Walk-in, 6 Pilar
 - Auto-deteksi 2 format file Omset utama: file master (sheet Faktur Penjualan +
   Scoreboard) ATAU file per-cabang "Rincian Faktur Penjualan" (bisa banyak file sekaligus)
+- PENTING - Auto-replace file lama saat upload baru: file Omset (baik format master maupun
+  per-cabang) yang diexport ulang biasanya berisi data KUMULATIF dari awal periode s/d
+  tanggal export terbaru (bukan cuma data baru sejak upload terakhir). Kalau file lama untuk
+  cabang/jenis yang sama tetap disimpan, isinya akan tumpang tindih dengan file baru dan
+  Omset jadi terhitung DOBEL saat dijumlahkan. Makanya setiap kali ada file baru diupload,
+  file lama dengan cabang (untuk format per-cabang) atau jenis (master) yang sama otomatis
+  dihapus dulu - lihat _detect_main_file_kind() dan blok upload di sidebar.
 - 6 Pilar MFlash: klasifikasi omset dari kolom KATEGORI PILAR yang HANYA ada di file
   per-cabang (Rincian Faktur Penjualan), tidak ada di file master lama. PENTING: nama
   kolom ini TIDAK seragam antar file - kadang "KATEGORI PILAR Sales Invoice", kadang
@@ -518,6 +525,29 @@ def _find_data_sheet(wb):
                 col_idx[str(h).strip().upper()] = i
         if all(c in col_idx for c in REQUIRED_COLUMNS):
             return ws, col_idx
+    return None, None
+
+
+def _detect_main_file_kind(file_bytes: bytes, filename: str):
+    """Deteksi jenis file Omset ('per_branch' + nama cabang, atau 'master') TANPA parse
+    penuh isinya (cuma peek nama sheet + header, read_only=True, murah) - dipakai supaya
+    upload baru bisa otomatis menggantikan file lama untuk cabang/jenis yang sama.
+
+    Ini penting karena file Omset (baik format master maupun per-cabang) yang diexport
+    ulang biasanya berisi data KUMULATIF sejak awal periode s/d tanggal export terbaru,
+    bukan cuma data baru. Kalau file lama untuk cabang yang sama tetap disimpan berdampingan
+    dengan file baru, rentang tanggal yang tumpang tindih akan terhitung DOBEL saat
+    load_all_main_data() menjumlahkan semua file di folder."""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001
+        return None, None
+    faktur_sheet_name = next((n for n in wb.sheetnames if n.strip().lower() == _FAKTUR_SHEET_NAME.lower()), None)
+    if faktur_sheet_name is not None:
+        return "per_branch", branch_from_faktur_filename(filename)
+    ws, _ = _find_data_sheet(wb)
+    if ws is not None:
+        return "master", None
     return None, None
 
 
@@ -2333,25 +2363,55 @@ with st.sidebar:
     st.markdown("**1️⃣ Data Omset Utama**")
     st.caption(
         "File master (Faktur Penjualan) ATAU file per-cabang (Rincian Faktur Penjualan). "
-        "Khusus untuk tab 6 Pilar, gunakan file per-cabang (Rincian Faktur Penjualan) karena "
-        "file master lama tidak punya kolom KATEGORI PILAR."
+        "Setiap upload baru untuk cabang/jenis yang sama OTOMATIS MENGGANTIKAN file lama "
+        "(karena file yang diexport ulang biasanya berisi data kumulatif s/d tanggal "
+        "terbaru, bukan cuma data baru saja) - supaya omset tidak terhitung dobel."
     )
     main_files = st.file_uploader(
         "Upload file Omset", type=["xlsx"], accept_multiple_files=True, key="upl_main",
     )
     if main_files:
+        n_replaced = 0
         for uf in main_files:
             if len(os.listdir(MAIN_DATA_DIR)) >= MAX_MAIN_FILES:
                 st.warning(f"Batas maksimal {MAX_MAIN_FILES} file Omset tercapai.")
                 break
             fname = sanitize_filename(uf.name)
+            file_bytes = bytes(uf.getbuffer())
+            kind, branch = _detect_main_file_kind(file_bytes, fname)
+
+            # Auto-replace: hapus file lama dengan jenis (master) atau cabang (per_branch)
+            # yang sama supaya data yang tumpang tindih tidak dijumlahkan dobel.
+            if kind in ("per_branch", "master"):
+                for existing_fname in sorted(os.listdir(MAIN_DATA_DIR)):
+                    if not existing_fname.lower().endswith(".xlsx") or existing_fname == fname:
+                        continue
+                    existing_path = os.path.join(MAIN_DATA_DIR, existing_fname)
+                    try:
+                        with open(existing_path, "rb") as ef:
+                            existing_bytes = ef.read()
+                        existing_kind, existing_branch = _detect_main_file_kind(existing_bytes, existing_fname)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    same_group = (
+                        (kind == "master" and existing_kind == "master")
+                        or (kind == "per_branch" and existing_kind == "per_branch" and existing_branch == branch)
+                    )
+                    if same_group:
+                        os.remove(existing_path)
+                        github_delete_file(f"data/main/{existing_fname}", f"Auto-replace dengan upload baru: {fname}")
+                        n_replaced += 1
+
             fpath = os.path.join(MAIN_DATA_DIR, fname)
             with open(fpath, "wb") as f:
-                f.write(uf.getbuffer())
+                f.write(file_bytes)
             status = github_upload_file(fpath, f"data/main/{fname}", f"Upload {fname}")
             if status == "error":
                 st.session_state["_gh_warnings"].add(f"Gagal backup {fname} ke GitHub.")
-        st.success(f"{len(main_files)} file omset tersimpan.")
+        msg = f"{len(main_files)} file omset tersimpan."
+        if n_replaced:
+            msg += f" {n_replaced} file lama untuk cabang/jenis yang sama otomatis diganti."
+        st.success(msg)
 
     existing_main = sorted(f for f in os.listdir(MAIN_DATA_DIR) if f.lower().endswith(".xlsx"))
     if existing_main:
