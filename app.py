@@ -24,6 +24,10 @@ Fitur utama:
   _find_pilar_column_index()). Setiap Pilar juga dilengkapi Gross Profit (TOTAL HARGA -
   HARGA BELI, atau kolom GROSS PROFIT yang sudah dihitung di file master kalau ada) dan
   Qty khusus untuk Pilar Penyewaan Corporate & Maintenance Corporate.
+- Tab Walk-in: tabel Jumlah & Rata-rata Walk-in per Cabang dengan styling kotak & warna
+  (hijau kalau di atas rata-rata semua cabang, merah kalau di bawah), bisa didownload
+  sebagai JPG (matplotlib) maupun PDF (reportlab), plus insight & rekomendasi program
+  marketing untuk cabang yang walk-in-nya di bawah rata-rata.
 - Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet Scoreboard (kalau ada),
   dengan fallback ke file Target manual yang diupload - file manual DIPRIORITASKAN kalau
   auto-ekstrak gagal menemukan angka target yang valid (lihat _has_target_signal())
@@ -477,6 +481,53 @@ def _to_float_or_none(v):
 
 
 # --------------------------------------------------------------------------------------
+# Kontribusi Marketing Corporate vs Sales Retail
+# --------------------------------------------------------------------------------------
+# Kolom "NAMA DEFAULT PENJUAL PELANGGAN FAKTUR PENJUALAN" (per-cabang) / "NAMA PENJUAL"
+# (master) biasanya berisi nama staf DEFAULT per cabang (mis. "ENDARWAN KLENDER",
+# "NIKO ALFA PRAMUDITA") - ini dihitung sebagai kontribusi Sales Retail. Tapi kalau isinya
+# adalah salah satu nama tim Marketing Corporate di bawah ini, transaksi itu dihitung
+# sebagai kontribusi Marketing Corporate. Selisih antara Omset total dan kontribusi
+# Marketing Corporate adalah kontribusi Sales Retail (sesuai definisi user).
+MARKETING_CORPORATE_NAMES = [
+    "DICKY YUNIAWAN", "FAISAL ABDUL RAHMAN", "IQBAL SABARI SALES", "IQBAL SABARI",
+    "IKBAL SABARI", "KOUTSAREZRA KANZA", "M SYAFAAT", "MUHAMMAD SYAFAAT",
+    "RAID IMADUDIN FIRAS", "TEGAR SALES", "TEGAR PUTRA YANSA", "TEGAR PUTRA YANSYAH",
+    "WAHYU JP JATIWARINGIN", "WAHYU JP (RADJIMAN)", "WAHYU JP", "SUPRIYADI",
+    "PAOLO MAROLANZANO", "SOLEHUDIN", "RIFQI ADITYA", "M FARHAN ZAHRAN",
+    "KAUKABAN AL AKWAN",
+]
+_MC_LABEL = "Marketing Corporate"
+_RETAIL_LABEL = "Sales Retail"
+
+
+def _find_penjual_column_index(col_idx: dict):
+    """Cari index kolom nama penjual. Prioritaskan 'NAMA PENJUAL' persis (kolom final yang
+    ada di beberapa file master), fallback ke kolom yang namanya mengandung 'DEFAULT
+    PENJUAL' (nama kolom asli di file per-cabang: 'Nama Default Penjual Pelanggan Faktur
+    Penjualan')."""
+    for header, idx in col_idx.items():
+        if header == "NAMA PENJUAL":
+            return idx
+    for header, idx in col_idx.items():
+        if "DEFAULT PENJUAL" in header:
+            return idx
+    return None
+
+
+def classify_penjual_kelompok(nama_penjual) -> str:
+    if not nama_penjual:
+        return _RETAIL_LABEL
+    v = str(nama_penjual).strip().upper()
+    if not v:
+        return _RETAIL_LABEL
+    for known in MARKETING_CORPORATE_NAMES:
+        if known in v or v in known:
+            return _MC_LABEL
+    return _RETAIL_LABEL
+
+
+# --------------------------------------------------------------------------------------
 # Loader data Omset utama
 # --------------------------------------------------------------------------------------
 
@@ -600,6 +651,7 @@ def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
     barang_idx = col_idx["KATEGORI BARANG"]
     total_idx = col_idx["TOTAL HARGA"]
     pilar_idx = _find_pilar_column_index(col_idx)
+    penjual_idx = _find_penjual_column_index(col_idx)
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         if tgl_idx >= len(row) or barang_idx >= len(row) or total_idx >= len(row):
@@ -616,11 +668,14 @@ def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
         except (TypeError, ValueError):
             continue
         pilar_raw = row[pilar_idx] if (pilar_idx is not None and pilar_idx < len(row)) else None
+        penjual_raw = row[penjual_idx] if (penjual_idx is not None and penjual_idx < len(row)) else None
         qty_val, gp_val = _extract_qty_gp(row, col_idx, total)
         rows.append({
             "Cabang": branch, "Tanggal": pd.Timestamp(tgl.date()), "Tahun": tgl.year, "Bulan": tgl.month,
             "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total,
             "Pilar": classify_pilar(pilar_raw), "Qty": qty_val, "GrossProfit": gp_val, "SumberFile": filename_hint,
+            "Penjual": str(penjual_raw).strip() if penjual_raw else "",
+            "KelompokPenjual": classify_penjual_kelompok(penjual_raw),
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -635,6 +690,7 @@ def _load_master_sheet(ws, col_idx, filename_hint: str) -> pd.DataFrame:
     barang_idx = col_idx["KATEGORI BARANG"]
     total_idx = col_idx["TOTAL HARGA"]
     pilar_idx = _find_pilar_column_index(col_idx)
+    penjual_idx = _find_penjual_column_index(col_idx)
     rows = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         max_idx = max(cabang_idx, tgl_idx, barang_idx, total_idx)
@@ -654,11 +710,14 @@ def _load_master_sheet(ws, col_idx, filename_hint: str) -> pd.DataFrame:
             continue
         cabang_norm = str(cabang).strip().upper()
         pilar_raw = row[pilar_idx] if (pilar_idx is not None and pilar_idx < len(row)) else None
+        penjual_raw = row[penjual_idx] if (penjual_idx is not None and penjual_idx < len(row)) else None
         qty_val, gp_val = _extract_qty_gp(row, col_idx, total)
         rows.append({
             "Cabang": cabang_norm, "Tanggal": pd.Timestamp(tgl.date()), "Tahun": tgl.year, "Bulan": tgl.month,
             "KategoriBarang": str(barang).strip().upper() if barang else "", "Omset": total,
             "Pilar": classify_pilar(pilar_raw), "Qty": qty_val, "GrossProfit": gp_val, "SumberFile": filename_hint,
+            "Penjual": str(penjual_raw).strip() if penjual_raw else "",
+            "KelompokPenjual": classify_penjual_kelompok(penjual_raw),
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -1178,46 +1237,151 @@ def aggregate_walkin_monthly(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["Tahun", "Bulan", "Cabang"]).reset_index(drop=True)
 
 
-def render_walkin_table_html(latest_agg: pd.DataFrame) -> str:
-    """Tabel ringkas jumlah & rata-rata walk-in per cabang untuk bulan berjalan, diurutkan
-    sesuai BRANCH_ORDER, dengan baris TOTAL di bagian bawah (rata-rata TOTAL dihitung
-    weighted: total walk-in semua cabang / total hari efektif, konsisten dengan metrik
-    'Rata-rata Walk-in / Hari' yang sudah ditampilkan di atas tabel)."""
-    if latest_agg.empty:
-        return "<p>Tidak ada data untuk periode ini.</p>"
+def _walkin_ordered(latest_agg: pd.DataFrame) -> pd.DataFrame:
     d = latest_agg.copy()
     branches_present = order_branches(d["Cabang"].tolist())
     d["Cabang"] = pd.Categorical(d["Cabang"], categories=branches_present, ordered=True)
     d = d.sort_values("Cabang").reset_index(drop=True)
     d["Cabang"] = d["Cabang"].astype(str)
+    return d
 
-    header_html = (
-        '<th style="padding:8px 10px;text-align:left;background:#0f766e;color:white;font-size:12px;">CABANG</th>'
-        '<th style="padding:8px 10px;text-align:right;background:#0f766e;color:white;font-size:12px;">TOTAL WALK-IN</th>'
-        '<th style="padding:8px 10px;text-align:right;background:#0f766e;color:white;font-size:12px;">RATA-RATA / HARI</th>'
-    )
-    rows_html = ""
-    for _, r in d.iterrows():
-        rows_html += (
-            f'<tr><td style="padding:7px 10px;">{r["Cabang"]}</td>'
-            f'<td style="padding:7px 10px;text-align:right;">{format_number(r["TotalWalkin"])}</td>'
-            f'<td style="padding:7px 10px;text-align:right;">{format_decimal(r["RataRataPerHari"])}</td></tr>'
-        )
 
+def _walkin_overall_avg(d: pd.DataFrame):
     total_walkin_sum = d["TotalWalkin"].sum()
     total_hari_sum = d["HariEfektif"].sum()
-    total_rata2 = (total_walkin_sum / total_hari_sum) if total_hari_sum else 0.0
+    return (total_walkin_sum / total_hari_sum) if total_hari_sum else 0.0, total_walkin_sum, total_hari_sum
+
+
+def render_walkin_table_html(latest_agg: pd.DataFrame) -> str:
+    """Tabel ringkas jumlah & rata-rata walk-in per cabang untuk bulan berjalan - diberi
+    bingkai kotak (border teal di sekeliling tabel) dan warna per baris: HIJAU kalau
+    rata-rata walk-in/hari cabang itu di atas atau sama dengan rata-rata SEMUA cabang,
+    MERAH kalau di bawahnya - supaya cabang yang tertinggal langsung kelihatan."""
+    if latest_agg.empty:
+        return "<p>Tidak ada data untuk periode ini.</p>"
+    d = _walkin_ordered(latest_agg)
+    overall_avg, total_walkin_sum, _ = _walkin_overall_avg(d)
+
+    header_html = (
+        '<th style="padding:8px 10px;text-align:left;background:#0f766e;color:white;font-size:12px;border:1px solid #0f766e;">CABANG</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#0f766e;color:white;font-size:12px;border:1px solid #0f766e;">TOTAL WALK-IN</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#0f766e;color:white;font-size:12px;border:1px solid #0f766e;">RATA-RATA / HARI</th>'
+    )
+    rows_html = ""
+    for i, r in d.iterrows():
+        rata = r["RataRataPerHari"]
+        above = rata >= overall_avg
+        rata_bg = "#dcfce7" if above else "#fee2e2"
+        rata_fg = "#166534" if above else "#991b1b"
+        row_bg = "#fafafa" if i % 2 else "#ffffff"
+        badge = "🟢" if above else "🔴"
+        rows_html += (
+            '<tr>'
+            f'<td style="padding:7px 10px;border:1px solid #e5e7eb;background:{row_bg};">{r["Cabang"]}</td>'
+            f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{row_bg};">{format_number(r["TotalWalkin"])}</td>'
+            f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{rata_bg};color:{rata_fg};font-weight:600;">{badge} {format_decimal(rata)}</td>'
+            '</tr>'
+        )
+
     total_row_html = (
-        '<tr style="background:#f0fdfa;">'
-        '<td style="padding:7px 10px;font-weight:700;">TOTAL</td>'
-        f'<td style="padding:7px 10px;text-align:right;font-weight:700;">{format_number(total_walkin_sum)}</td>'
-        f'<td style="padding:7px 10px;text-align:right;font-weight:700;">{format_decimal(total_rata2)}</td></tr>'
+        '<tr>'
+        '<td style="padding:7px 10px;border:1px solid #e5e7eb;background:#e0f2f1;font-weight:700;">TOTAL</td>'
+        f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:#e0f2f1;font-weight:700;">{format_number(total_walkin_sum)}</td>'
+        f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:#e0f2f1;font-weight:700;">{format_decimal(overall_avg)}</td>'
+        '</tr>'
     )
     return (
-        '<div style="overflow-x:auto;max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:8px;">'
+        '<div style="overflow-x:auto;max-height:460px;overflow-y:auto;border:2px solid #0f766e;border-radius:10px;">'
         f'<table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
         f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}{total_row_html}</tbody></table></div>"
     )
+
+
+def generate_walkin_table_image(latest_agg: pd.DataFrame, periode_label: str = "") -> bytes:
+    """Render tabel Walk-in per Cabang sebagai gambar JPG (pakai matplotlib) supaya bisa
+    didownload & dibagikan langsung, misalnya untuk laporan/presentasi cepat."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    d = _walkin_ordered(latest_agg)
+    overall_avg, total_walkin_sum, _ = _walkin_overall_avg(d)
+
+    col_labels = ["CABANG", "TOTAL WALK-IN", "RATA-RATA / HARI"]
+    cell_text, cell_colors = [], []
+    for _, r in d.iterrows():
+        above = r["RataRataPerHari"] >= overall_avg
+        cell_text.append([r["Cabang"], format_number(r["TotalWalkin"]), format_decimal(r["RataRataPerHari"])])
+        cell_colors.append(["#ffffff", "#ffffff", "#dcfce7" if above else "#fee2e2"])
+    cell_text.append(["TOTAL", format_number(total_walkin_sum), format_decimal(overall_avg)])
+    cell_colors.append(["#e0f2f1", "#e0f2f1", "#e0f2f1"])
+
+    n_rows = len(cell_text)
+    fig_height = 0.4 * (n_rows + 1) + 0.7
+    fig, ax = plt.subplots(figsize=(6.8, fig_height))
+    ax.axis("off")
+    if periode_label:
+        ax.set_title(f"Walk-in per Cabang — {periode_label}", fontsize=12, fontweight="bold", color="#0f766e", pad=16)
+
+    table = ax.table(cellText=cell_text, colLabels=col_labels, cellColours=cell_colors, cellLoc="center", loc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.5)
+    for (row, _col), cell in table.get_celld().items():
+        cell.set_edgecolor("#d1d5db")
+        if row == 0:
+            cell.set_facecolor("#0f766e")
+            cell.set_text_props(color="white", fontweight="bold")
+        elif row == n_rows:
+            cell.set_text_props(fontweight="bold")
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="jpg", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def generate_walkin_table_pdf(latest_agg: pd.DataFrame, periode_label: str = "") -> bytes:
+    """Render tabel Walk-in per Cabang sebagai PDF (pakai reportlab), dengan warna baris
+    yang sama seperti tampilan di dashboard (hijau/merah relatif ke rata-rata semua cabang)."""
+    d = _walkin_ordered(latest_agg)
+    overall_avg, total_walkin_sum, _ = _walkin_overall_avg(d)
+
+    data = [["CABANG", "TOTAL WALK-IN", "RATA-RATA / HARI"]]
+    row_colors = []
+    for _, r in d.iterrows():
+        data.append([r["Cabang"], format_number(r["TotalWalkin"]), format_decimal(r["RataRataPerHari"])])
+        above = r["RataRataPerHari"] >= overall_avg
+        row_colors.append(rl_colors.HexColor("#dcfce7") if above else rl_colors.HexColor("#fee2e2"))
+    data.append(["TOTAL", format_number(total_walkin_sum), format_decimal(overall_avg)])
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("TitleWalkin", parent=styles["Title"], textColor=rl_colors.HexColor("#0f766e"), fontSize=16)
+
+    story = [Paragraph("Tabel Walk-in per Cabang", title_style)]
+    if periode_label:
+        story.append(Paragraph(periode_label, styles["Normal"]))
+    story.append(Spacer(1, 0.5 * cm))
+
+    table = Table(data, colWidths=[5.5 * cm, 5 * cm, 5 * cm])
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#0f766e")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+        ("GRID", (0, 0), (-1, -1), 0.5, rl_colors.HexColor("#d1d5db")),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BACKGROUND", (0, -1), (-1, -1), rl_colors.HexColor("#e0f2f1")),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+    ]
+    for i, color in enumerate(row_colors, start=1):
+        style_cmds.append(("BACKGROUND", (2, i), (2, i), color))
+    table.setStyle(TableStyle(style_cmds))
+    story.append(table)
+    doc.build(story)
+    return buf.getvalue()
 
 
 _WALKIN_ACTION_PLAN = {
@@ -1235,6 +1399,33 @@ _WALKIN_ACTION_PLAN = {
         "adakan promo/event kecil berkala (mis. diskon cek gratis di akhir pekan) untuk menarik walk-in baru",
     ],
 }
+
+
+def generate_walkin_marketing_insights(latest_agg: pd.DataFrame) -> list:
+    """Insight & rekomendasi PROGRAM MARKETING untuk cabang yang rata-rata walk-in/hari-nya
+    di bawah 85% rata-rata semua cabang pada bulan berjalan (dibandingkan ke sesama cabang,
+    bukan ke bulan lalu — melengkapi generate_walkin_insights() yang sudah ada)."""
+    insights = []
+    if latest_agg.empty:
+        return insights
+    d = _walkin_ordered(latest_agg)
+    overall_avg, _, _ = _walkin_overall_avg(d)
+    if not overall_avg:
+        return insights
+    for _, r in d.sort_values("RataRataPerHari").iterrows():
+        rata = r["RataRataPerHari"]
+        if rata >= overall_avg * 0.85:
+            continue
+        pct_below = (overall_avg - rata) / overall_avg
+        insights.append({
+            "level": "bad" if pct_below >= 0.4 else "warn",
+            "category": "Walk-in Cabang", "title": str(r["Cabang"]),
+            "problem": f"Rata-rata walk-in/hari cabang ini ({format_decimal(rata)}) {format_percent(pct_below)} "
+                       f"di bawah rata-rata seluruh cabang ({format_decimal(overall_avg)}). Perlu dorongan "
+                       f"program marketing supaya trafik walk-in naik mendekati cabang lain.",
+            "online": _WALKIN_ACTION_PLAN["online"], "offline": _WALKIN_ACTION_PLAN["offline"],
+        })
+    return insights
 
 
 def generate_walkin_insights(agg_df: pd.DataFrame):
@@ -2033,6 +2224,207 @@ def render_pilar_summary_table_html(pilar_summary: pd.DataFrame) -> str:
 
 
 # --------------------------------------------------------------------------------------
+# Kontribusi Marketing Corporate vs Sales Retail terhadap Omset All/Service/Gadget
+# --------------------------------------------------------------------------------------
+
+_MC_CATEGORY_ORDER = ["All", "Service", "Gadget & Aksesoris"]
+_MC_CATEGORY_LABELS = {"All": "Omset All", "Service": "Omset Service", "Gadget & Aksesoris": "Penjualan Gadget & Aksesoris"}
+_MC_CATEGORY_ICONS = {"All": "💰", "Service": "🛠️", "Gadget & Aksesoris": "📱"}
+_MC_CATEGORY_COLORS = {"All": "#1d4ed8", "Service": "#0f766e", "Gadget & Aksesoris": "#6d28d9"}
+
+
+def _mc_filter_bulan_berjalan(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    d = df.copy()
+    if selected_branches:
+        d = d[d["Cabang"].isin(selected_branches)]
+    d = d[(d["Tahun"] == tanggal_acuan.year) & (d["Bulan"] == tanggal_acuan.month) & (d["Tanggal"].dt.day <= tanggal_acuan.day)]
+    return d
+
+
+def build_mc_contribution_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    """Kontribusi Marketing Corporate vs Sales Retail (selisihnya) terhadap Omset All,
+    Omset Service, dan Penjualan Gadget & Aksesoris, untuk bulan berjalan s/d tanggal acuan."""
+    empty = pd.DataFrame(columns=["Kategori", "OmsetTotal", "OmsetMC", "OmsetRetail", "PctMC"])
+    if df is None or df.empty or "KelompokPenjual" not in df.columns:
+        return empty
+    d = _mc_filter_bulan_berjalan(df, tanggal_acuan, selected_branches)
+    if d.empty:
+        return empty
+
+    rows = []
+    for kat in _MC_CATEGORY_ORDER:
+        sub = d if kat == "All" else d[d["Kelompok"] == kat]
+        total = float(sub["Omset"].sum())
+        mc = float(sub.loc[sub["KelompokPenjual"] == _MC_LABEL, "Omset"].sum())
+        retail = total - mc
+        pct_mc = (mc / total) if total else None
+        rows.append({"Kategori": kat, "OmsetTotal": total, "OmsetMC": mc, "OmsetRetail": retail, "PctMC": pct_mc})
+    return pd.DataFrame(rows)
+
+
+def build_mc_person_table(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    """Rincian kontribusi per orang di tim Marketing Corporate, dipecah per Service /
+    Gadget & Aksesoris / Total, diurutkan dari kontribusi terbesar, plus baris TOTAL."""
+    if df is None or df.empty or "KelompokPenjual" not in df.columns:
+        return pd.DataFrame()
+    d = _mc_filter_bulan_berjalan(df, tanggal_acuan, selected_branches)
+    d = d[d["KelompokPenjual"] == _MC_LABEL]
+    if d.empty:
+        return pd.DataFrame()
+
+    pivot = d.pivot_table(index="Penjual", columns="Kelompok", values="Omset", aggfunc="sum", fill_value=0.0)
+    for kat in ["Service", "Gadget & Aksesoris"]:
+        if kat not in pivot.columns:
+            pivot[kat] = 0.0
+    pivot = pivot[["Service", "Gadget & Aksesoris"]]
+    pivot["Total"] = pivot["Service"] + pivot["Gadget & Aksesoris"]
+    pivot = pivot.sort_values("Total", ascending=False).reset_index()
+
+    total_row = {
+        "Penjual": "TOTAL", "Service": pivot["Service"].sum(),
+        "Gadget & Aksesoris": pivot["Gadget & Aksesoris"].sum(), "Total": pivot["Total"].sum(),
+    }
+    return pd.concat([pivot, pd.DataFrame([total_row])], ignore_index=True)
+
+
+def render_mc_contribution_card(kategori: str, omset_total: float, omset_mc: float, omset_retail: float, pct_mc) -> str:
+    color = _MC_CATEGORY_COLORS.get(kategori, "#374151")
+    icon = _MC_CATEGORY_ICONS.get(kategori, "📊")
+    label = _MC_CATEGORY_LABELS.get(kategori, kategori)
+    pct_text = format_percent(pct_mc) if pct_mc is not None else "-"
+    pct_retail_text = format_percent(1 - pct_mc) if pct_mc is not None else "-"
+    return f"""
+    <div style="background:{color};border-radius:14px;padding:16px 18px;color:white;
+                box-shadow:0 2px 8px rgba(0,0,0,.12);height:100%;">
+      <div style="font-size:22px;line-height:1;">{icon}</div>
+      <div style="font-size:13px;opacity:.9;margin-top:8px;">{label}</div>
+      <div style="font-size:19px;font-weight:700;margin-top:2px;">{format_rupiah(omset_total)}</div>
+      <div style="font-size:12px;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.25);">
+        🤝 Marketing Corporate: <b>{format_rupiah(omset_mc)}</b> ({pct_text})
+      </div>
+      <div style="font-size:12px;margin-top:4px;">
+        🏬 Sales Retail: <b>{format_rupiah(omset_retail)}</b> ({pct_retail_text})
+      </div>
+    </div>
+    """
+
+
+def render_mc_split_donut(omset_mc: float, omset_retail: float, title: str = ""):
+    if not (omset_mc or omset_retail):
+        return None
+    fig = px.pie(
+        names=["Marketing Corporate", "Sales Retail"], values=[max(omset_mc, 0), max(omset_retail, 0)],
+        hole=0.5, color_discrete_sequence=["#1d4ed8", "#f59e0b"], title=title or None,
+    )
+    fig.update_traces(textinfo="label+percent")
+    fig.update_layout(height=280, margin=dict(l=10, r=10, t=40 if title else 10, b=10), showlegend=False)
+    return fig
+
+
+def render_mc_person_table_html(mc_person: pd.DataFrame) -> str:
+    if mc_person.empty:
+        return "<p>Belum ada transaksi dari tim Marketing Corporate pada periode ini.</p>"
+    header_html = (
+        '<th style="padding:8px 10px;text-align:left;background:#1d4ed8;color:white;font-size:12px;border:1px solid #1d4ed8;">NAMA</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#1d4ed8;color:white;font-size:12px;border:1px solid #1d4ed8;">SERVICE</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#1d4ed8;color:white;font-size:12px;border:1px solid #1d4ed8;">GADGET & AKSESORIS</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#1d4ed8;color:white;font-size:12px;border:1px solid #1d4ed8;">TOTAL</th>'
+    )
+    rows_html = ""
+    for i, r in mc_person.iterrows():
+        is_total = r["Penjual"] == "TOTAL"
+        bg = "#eff6ff" if is_total else ("#fafafa" if i % 2 else "#ffffff")
+        fw = "700" if is_total else "400"
+        rows_html += (
+            '<tr>'
+            f'<td style="padding:7px 10px;border:1px solid #e5e7eb;background:{bg};font-weight:{fw};">{r["Penjual"]}</td>'
+            f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{bg};font-weight:{fw};">{format_rupiah(r["Service"])}</td>'
+            f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{bg};font-weight:{fw};">{format_rupiah(r["Gadget & Aksesoris"])}</td>'
+            f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{bg};font-weight:{fw};">{format_rupiah(r["Total"])}</td>'
+            '</tr>'
+        )
+    return (
+        '<div style="overflow-x:auto;max-height:460px;overflow-y:auto;border:2px solid #1d4ed8;border-radius:10px;">'
+        f'<table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
+        f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}</tbody></table></div>"
+    )
+
+
+_MC_MARKETING_ACTION_PLAN = {
+    "online": [
+        "bekali tim Marketing Corporate dengan materi promosi digital (company profile, katalog "
+        "harga, studi kasus) yang bisa langsung dikirim ke calon klien via WhatsApp/email",
+        "dorong tim Marketing Corporate posting aktivitas & hasil kerja sama corporate di LinkedIn "
+        "pribadi masing-masing untuk memperluas jaringan personal branding",
+        "buat leaderboard performa bulanan tim Marketing Corporate yang dibagikan di grup internal "
+        "supaya ada dorongan kompetisi sehat",
+    ],
+    "offline": [
+        "evaluasi rutin (mingguan/bulanan) pipeline leads corporate per orang supaya follow-up tidak "
+        "terlewat",
+        "adakan sesi sharing rutin dari top performer Marketing Corporate ke anggota tim lain untuk "
+        "menularkan teknik closing yang efektif",
+        "pastikan setiap anggota tim Marketing Corporate punya target kunjungan/penawaran bulanan yang "
+        "jelas dan terukur",
+    ],
+}
+
+
+def generate_mc_insights(mc_summary: pd.DataFrame, mc_person: pd.DataFrame) -> list:
+    insights = []
+    if mc_summary.empty:
+        return insights
+
+    all_row = mc_summary[mc_summary["Kategori"] == "All"]
+    if not all_row.empty:
+        pct_mc = all_row.iloc[0]["PctMC"]
+        omset_mc = all_row.iloc[0]["OmsetMC"]
+        omset_total = all_row.iloc[0]["OmsetTotal"]
+        if pct_mc is not None and omset_total:
+            if pct_mc < 0.10:
+                insights.append({
+                    "level": "warn", "category": "Marketing Corporate", "title": "Kontribusi MC ke Omset All",
+                    "problem": f"Tim Marketing Corporate baru menyumbang {format_percent(pct_mc)} "
+                               f"({format_rupiah(omset_mc)}) dari total Omset All ({format_rupiah(omset_total)}) "
+                               f"bulan ini — masih sangat bergantung pada Sales Retail. Ada peluang besar untuk "
+                               f"meningkatkan kontribusi tim Marketing Corporate.",
+                    "online": _MC_MARKETING_ACTION_PLAN["online"], "offline": _MC_MARKETING_ACTION_PLAN["offline"],
+                })
+            elif pct_mc >= 0.30:
+                insights.append({
+                    "level": "good", "category": "Marketing Corporate", "title": "Kontribusi MC ke Omset All",
+                    "problem": f"Tim Marketing Corporate menyumbang {format_percent(pct_mc)} "
+                               f"({format_rupiah(omset_mc)}) dari total Omset All ({format_rupiah(omset_total)}) "
+                               f"bulan ini — kontribusi yang sehat, pertahankan momentum ini.",
+                    "online": [], "offline": [],
+                })
+
+    if not mc_person.empty:
+        person_only = mc_person[mc_person["Penjual"] != "TOTAL"]
+        if not person_only.empty:
+            top = person_only.iloc[0]
+            insights.append({
+                "level": "good", "category": "Marketing Corporate", "title": f"Top Contributor: {top['Penjual']}",
+                "problem": f"Kontribusi tertinggi bulan ini dari {top['Penjual']} dengan total omset "
+                           f"{format_rupiah(top['Total'])}. Pelajari & bagikan pendekatannya ke anggota tim lain.",
+                "online": [], "offline": [],
+            })
+            low_contributors = person_only[person_only["Total"] < person_only["Total"].mean() * 0.4]
+            if len(person_only) >= 3 and not low_contributors.empty:
+                names = ", ".join(low_contributors["Penjual"].tolist())
+                insights.append({
+                    "level": "warn", "category": "Marketing Corporate", "title": "Kontribusi di bawah rata-rata tim",
+                    "problem": f"{names} berkontribusi jauh di bawah rata-rata tim Marketing Corporate bulan ini. "
+                               f"Perlu pendampingan/evaluasi pipeline mereka.",
+                    "online": _MC_MARKETING_ACTION_PLAN["online"], "offline": _MC_MARKETING_ACTION_PLAN["offline"],
+                })
+
+    return insights
+
+
+# --------------------------------------------------------------------------------------
 # Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet "Scoreboard"
 # --------------------------------------------------------------------------------------
 
@@ -2630,8 +3022,8 @@ omset_gadget_val = _sd_value(smm_gadget)
 omset_all_val = _sd_value(smm_all)
 omset_corp_val = _sd_value(smm_corp)
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📊 Ringkasan", "🗂️ Scoreboard", "📣 Iklan", "🚶 Walk-in", "🏛️ 6 Pilar"]
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["📊 Ringkasan", "🗂️ Scoreboard", "📣 Iklan", "🚶 Walk-in", "🏛️ 6 Pilar", "🤝 Kontribusi MC"]
 )
 
 # ==================================== TAB 1: RINGKASAN ====================================
@@ -2759,9 +3151,12 @@ with tab4:
         jumlah_cabang = df_walkin_f["Cabang"].nunique()
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total Walk-in", format_number(total_walkin))
-        m2.metric("Rata-rata Walk-in / Hari", format_decimal(rata2_harian))
-        m3.metric("Jumlah Cabang", format_number(jumlah_cabang))
+        with m1:
+            st.markdown(render_kpi_card_text("Total Walk-in", format_number(total_walkin), "#0f766e", "#134e4a", "🚶"), unsafe_allow_html=True)
+        with m2:
+            st.markdown(render_kpi_card_text("Rata-rata Walk-in / Hari", format_decimal(rata2_harian), "#6d28d9", "#4c1d95", "📊"), unsafe_allow_html=True)
+        with m3:
+            st.markdown(render_kpi_card_text("Jumlah Cabang", format_number(jumlah_cabang), "#b45309", "#78350f", "🏬"), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("**Walk-in per Cabang (Bulan Berjalan)**")
@@ -2775,10 +3170,37 @@ with tab4:
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("**Tabel Jumlah & Rata-rata Walk-in per Cabang (Bulan Berjalan)**")
             st.markdown(render_walkin_table_html(latest_agg), unsafe_allow_html=True)
+            st.caption("🟢 Rata-rata/hari di atas rata-rata seluruh cabang · 🔴 Di bawah rata-rata seluruh cabang")
+
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                st.download_button(
+                    "🖼️ Download Tabel (JPG)",
+                    data=generate_walkin_table_image(latest_agg, periode_label),
+                    file_name=f"Walkin_per_Cabang_{tanggal_acuan.isoformat()}.jpg",
+                    mime="image/jpeg", key="dl_walkin_jpg", use_container_width=True,
+                )
+            with dl2:
+                st.download_button(
+                    "📄 Download Tabel (PDF)",
+                    data=generate_walkin_table_pdf(latest_agg, periode_label),
+                    file_name=f"Walkin_per_Cabang_{tanggal_acuan.isoformat()}.pdf",
+                    mime="application/pdf", key="dl_walkin_pdf", use_container_width=True,
+                )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("#### 📢 Insight & Program Marketing — Walk-in per Cabang")
+            st.caption("Dibandingkan ke rata-rata SEMUA cabang bulan ini (bukan ke bulan lalu).")
+            walkin_marketing_insights = generate_walkin_marketing_insights(latest_agg)
+            if not walkin_marketing_insights:
+                st.success("Semua cabang berada di rata-rata atau di atasnya untuk periode ini — pertahankan strategi berjalan.")
+            else:
+                for item in walkin_marketing_insights:
+                    st.markdown(render_structured_insight_card(item), unsafe_allow_html=True)
 
         walkin_insights = generate_walkin_insights(walkin_agg)
         st.markdown("---")
-        st.markdown("#### 📋 Insight & Rekomendasi Walk-in")
+        st.markdown("#### 📋 Insight Tren Bulanan (Dibanding Bulan Lalu)")
         if not walkin_insights:
             st.success("Tidak ada catatan khusus untuk walk-in saat ini.")
         else:
@@ -2863,6 +3285,70 @@ with tab5:
                 else:
                     for ins in pilar_insights:
                         st.markdown(render_insight_card(ins["title"], ins["text"], ins["level"]), unsafe_allow_html=True)
+
+# ==================================== TAB 6: KONTRIBUSI MC ====================================
+with tab6:
+    st.markdown(f"#### Kontribusi Marketing Corporate — {periode_label}")
+    st.caption(
+        "Berdasarkan kolom nama penjual di faktur (NAMA DEFAULT PENJUAL / NAMA PENJUAL). Transaksi "
+        "atas nama anggota tim Marketing Corporate dihitung sebagai kontribusi Marketing Corporate; "
+        "selisihnya (nama penjual default per cabang) dihitung sebagai kontribusi Sales Retail."
+    )
+    if df_main_f.empty or "KelompokPenjual" not in df_main_f.columns:
+        st.info("Belum ada data Omset untuk periode ini.")
+    else:
+        mc_summary = build_mc_contribution_summary(df_main_f, tanggal_acuan, selected_branches)
+        if mc_summary.empty or mc_summary["OmsetTotal"].sum() == 0:
+            st.info("Belum ada omset untuk periode ini.")
+        else:
+            st.markdown("**Kontribusi Marketing Corporate vs Sales Retail per Kategori**")
+            cols = st.columns(3)
+            for i, kat in enumerate(_MC_CATEGORY_ORDER):
+                row = mc_summary[mc_summary["Kategori"] == kat].iloc[0]
+                with cols[i]:
+                    st.markdown(
+                        render_mc_contribution_card(kat, row["OmsetTotal"], row["OmsetMC"], row["OmsetRetail"], row["PctMC"]),
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("**Proporsi Marketing Corporate vs Sales Retail**")
+            d1, d2, d3 = st.columns(3)
+            for col, kat in zip([d1, d2, d3], _MC_CATEGORY_ORDER):
+                row = mc_summary[mc_summary["Kategori"] == kat].iloc[0]
+                with col:
+                    st.markdown(f"<div style='text-align:center;font-size:13px;color:#374151;font-weight:600;'>{_MC_CATEGORY_ICONS[kat]} {_MC_CATEGORY_LABELS[kat]}</div>", unsafe_allow_html=True)
+                    fig_donut = render_mc_split_donut(row["OmsetMC"], row["OmsetRetail"])
+                    if fig_donut is not None:
+                        st.plotly_chart(fig_donut, use_container_width=True, key=f"mc_donut_{kat.replace(' ', '_').replace('&', 'n')}")
+                    else:
+                        st.caption("Belum ada data.")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("**Rincian Kontribusi per Anggota Tim Marketing Corporate**")
+            mc_person = build_mc_person_table(df_main_f, tanggal_acuan, selected_branches)
+            st.markdown(render_mc_person_table_html(mc_person), unsafe_allow_html=True)
+
+            if not mc_person.empty:
+                dl1, dl2 = st.columns(2)
+                mc_person_no_total = mc_person[mc_person["Penjual"] != "TOTAL"]
+                if not mc_person_no_total.empty:
+                    with dl1:
+                        fig_mc_bar = px.bar(
+                            mc_person_no_total, x="Penjual", y="Total", text_auto=".2s",
+                            color_discrete_sequence=["#1d4ed8"],
+                        )
+                        fig_mc_bar.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10))
+                        st.plotly_chart(fig_mc_bar, use_container_width=True, key="mc_person_bar")
+
+            st.markdown("---")
+            st.markdown("#### 📋 Insight & Rekomendasi Marketing Corporate")
+            mc_insights = generate_mc_insights(mc_summary, mc_person)
+            if not mc_insights:
+                st.success("Belum ada catatan khusus untuk kontribusi Marketing Corporate periode ini.")
+            else:
+                for item in mc_insights:
+                    st.markdown(render_structured_insight_card(item), unsafe_allow_html=True)
 
 # ==================================== EXPORT LAPORAN ====================================
 st.markdown("---")
