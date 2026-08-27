@@ -5,13 +5,17 @@ Fitur utama:
 - Tab Ringkasan, Scoreboard, Iklan, Walk-in, 6 Pilar
 - Auto-deteksi 2 format file Omset utama: file master (sheet Faktur Penjualan +
   Scoreboard) ATAU file per-cabang "Rincian Faktur Penjualan" (bisa banyak file sekaligus)
-- PENTING - Auto-replace file lama saat upload baru: file Omset (baik format master maupun
-  per-cabang) yang diexport ulang biasanya berisi data KUMULATIF dari awal periode s/d
-  tanggal export terbaru (bukan cuma data baru sejak upload terakhir). Kalau file lama untuk
-  cabang/jenis yang sama tetap disimpan, isinya akan tumpang tindih dengan file baru dan
-  Omset jadi terhitung DOBEL saat dijumlahkan. Makanya setiap kali ada file baru diupload,
-  file lama dengan cabang (untuk format per-cabang) atau jenis (master) yang sama otomatis
-  dihapus dulu - lihat _detect_main_file_kind() dan blok upload di sidebar.
+- PENTING - Auto-dedupe file lama: file Omset (master maupun per-cabang) yang diexport
+  ulang biasanya berisi data KUMULATIF dari awal periode s/d tanggal export terbaru, bukan
+  cuma data baru. Kalau file lama untuk cabang/jenis yang sama tetap tersimpan berdampingan
+  dengan file baru, omset akan terhitung DOBEL. Ada 2 lapis proteksi:
+  1) Saat upload baru di sidebar, file lama dengan cabang/jenis yang sama langsung dihapus
+     (lihat _detect_main_file_kind() dan blok upload di sidebar).
+  2) Setiap kali app dijalankan/reload, _dedupe_main_files() memindai ULANG semua file yang
+     ada di folder data/main (termasuk yang baru disinkron dari GitHub saat restart) dan
+     otomatis membersihkan sisa-sisa duplikat lama yang mungkin masih tersimpan dari
+     sebelum proteksi #1 ada, dengan menyimpan hanya file TERBARU per cabang/jenis
+     (berdasarkan timestamp yang tertanam di nama file, fallback ke waktu modifikasi file).
 - 6 Pilar MFlash: klasifikasi omset dari kolom KATEGORI PILAR yang HANYA ada di file
   per-cabang (Rincian Faktur Penjualan), tidak ada di file master lama. PENTING: nama
   kolom ini TIDAK seragam antar file - kadang "KATEGORI PILAR Sales Invoice", kadang
@@ -91,9 +95,6 @@ st.set_page_config(
 # PENTING: hanya sembunyikan #MainMenu (hamburger menu) dan footer bawaan Streamlit -
 # JANGAN sentuh header/toolbar/decoration sama sekali, karena di versi Streamlit
 # terbaru tombol panah buka/tutup sidebar ("»") ikut berada di strip toolbar itu.
-# Kalau toolbar disembunyikan (mis. lewat [data-testid="stToolbar"] {display:none}),
-# tombol buka sidebar ikut hilang dan sidebar "Kelola Data" jadi tidak bisa dibuka sama
-# sekali - ini bug yang pernah terjadi di versi sebelumnya, jangan diulangi.
 st.markdown(
     """
     <style>
@@ -106,8 +107,7 @@ st.markdown(
 
 
 # --------------------------------------------------------------------------------------
-# GitHub Auto-Backup - supaya file yang diupload tidak hilang saat app di Streamlit
-# Community Cloud sleep / restart / redeploy (disk container bersifat sementara)
+# GitHub Auto-Backup
 # --------------------------------------------------------------------------------------
 
 _GH_API_BASE = "https://api.github.com"
@@ -134,10 +134,6 @@ def _gh_headers():
     }
 
 
-def _gh_repo_path(local_path: str) -> str:
-    return os.path.relpath(local_path, start=os.path.dirname(os.path.abspath(__file__)))
-
-
 def github_get_file_sha(repo_path: str):
     if not _GH_ENABLED:
         return None
@@ -152,7 +148,6 @@ def github_get_file_sha(repo_path: str):
 
 
 def github_upload_file(local_path: str, repo_path: str, message: str) -> str:
-    """Return 'ok' / 'too_large' / 'error' / 'disabled'."""
     if not _GH_ENABLED:
         return "disabled"
     try:
@@ -222,8 +217,6 @@ def github_list_dir(repo_path: str):
 
 
 def sync_data_from_github():
-    """Tarik kembali semua file (data omset/iklan/walkin + target/corporate manual +
-    ledger histori) dari GitHub ke disk lokal - dipanggil sekali di awal tiap sesi baru."""
     if not _GH_ENABLED:
         return
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -376,15 +369,20 @@ def classify_kategori(kategori_barang: str) -> str:
     return "Gadget & Aksesoris"
 
 
+def _extract_filename_timestamp(filename: str):
+    """Ekstrak timestamp YYMMDDHHMMSS yang tertanam di akhir nama file export (contoh
+    nyata: 'rincian_faktur_penjualan_001mflashklende_260826095209.xlsx' -> '260826095209').
+    Dipakai untuk menentukan file mana yang PALING BARU saat ada beberapa file untuk
+    cabang yang sama - lebih diandalkan daripada waktu modifikasi file (mtime), karena
+    mtime bisa ke-reset jadi sama untuk semua file saat disinkron ulang dari GitHub
+    ketika app restart. Return None kalau pola tidak ditemukan."""
+    name = os.path.splitext(os.path.basename(filename))[0]
+    m = re.search(r"(\d{12})$", name)
+    return m.group(1) if m else None
+
+
 # --------------------------------------------------------------------------------------
-# 6 Pilar MFlash - klasifikasi dari kolom KATEGORI PILAR yang HANYA ada di file per-cabang
-# (Rincian Faktur Penjualan). File master lama tidak punya kolom ini, jadi omset dari file
-# master akan otomatis masuk "Belum Dikategorikan".
-#
-# PENTING: nama kolom KATEGORI PILAR TIDAK seragam antar export/cabang - ada yang bernama
-# "KATEGORI PILAR Sales Invoice", ada yang "KATEGORI PILAR Faktur Penjualan" (keduanya
-# sudah ditemukan langsung di file nyata yang diupload user). Jadi jangan exact-match ke
-# satu nama saja - cari kolom mana pun yang header-nya DIAWALI "KATEGORI PILAR".
+# 6 Pilar MFlash
 # --------------------------------------------------------------------------------------
 
 PILAR_ORDER = [
@@ -402,9 +400,6 @@ PILAR_COLORS = {
     "4. Penyewaan Corporate": "#b45309", "5. Maintenance Corporate": "#0891b2",
     "6. Internet & Connectivity": "#65a30d", "Cicilan Syariah": "#be185d", "Belum Dikategorikan": "#9ca3af",
 }
-
-# Pilar yang perlu ditampilkan metrik Qty tambahan di KPI card (selain Omset & Gross
-# Profit yang berlaku untuk semua pilar) - sesuai permintaan eksplisit user.
 _PILAR_SHOW_QTY = {"4. Penyewaan Corporate", "5. Maintenance Corporate"}
 
 
@@ -413,10 +408,6 @@ def _pilar_label(p: str) -> str:
 
 
 def _find_pilar_column_index(col_idx: dict):
-    """Cari index kolom KATEGORI PILAR di dict {header_upper: index}. Nama kolom ini
-    TIDAK seragam antar file export (contoh nyata yang sudah ditemukan: 'KATEGORI PILAR
-    SALES INVOICE' dan 'KATEGORI PILAR FAKTUR PENJUALAN'), jadi dicari dengan prefix
-    match ke 'KATEGORI PILAR', bukan exact match ke satu variasi nama saja."""
     for header, idx in col_idx.items():
         if header.startswith("KATEGORI PILAR"):
             return idx
@@ -424,10 +415,6 @@ def _find_pilar_column_index(col_idx: dict):
 
 
 def classify_pilar(raw_value) -> str:
-    """Klasifikasi nilai kolom KATEGORI PILAR ke salah satu dari 6 Pilar resmi MFlash,
-    plus 2 kategori tambahan: 'Cicilan Syariah' (kadang tercatat di kolom ini sebagai
-    metode pembayaran) dan 'Belum Dikategorikan' (kosong/tidak dikenali/file tidak punya
-    kolom ini sama sekali)."""
     if raw_value is None:
         return "Belum Dikategorikan"
     v = str(raw_value).strip().upper()
@@ -490,28 +477,13 @@ def _to_float_or_none(v):
 
 
 # --------------------------------------------------------------------------------------
-# Loader data Omset utama - mendukung DUA format:
-# 1) Format lama (file master): sheet "Faktur Penjualan" + kolom CABANG, dibaca streaming
-#    (read_only=True) untuk performa karena filenya besar (puluhan MB, semua cabang).
-#    Format ini TIDAK punya kolom KATEGORI PILAR -> semua barisnya "Belum Dikategorikan".
-#    Tapi format ini SUDAH punya kolom "GROSS PROFIT" yang dihitung sendiri, jadi dipakai
-#    langsung kalau ada (lebih akurat daripada dihitung ulang).
-# 2) Format baru (per cabang): sheet "Rincian Faktur Penjualan", TIDAK ada kolom CABANG
-#    (cabang diambil dari nama file), dan filenya punya bug tag <dimension> yang salah
-#    (cuma mendeklarasikan 1 sel) sehingga read_only=True gagal membaca semua baris -
-#    harus di-parse penuh (bukan streaming). Format ini PUNYA kolom KATEGORI PILAR
-#    (nama persisnya bervariasi, lihat _find_pilar_column_index()), tapi TIDAK ada kolom
-#    GROSS PROFIT siap pakai, jadi dihitung sendiri: GROSS PROFIT = TOTAL HARGA - HARGA
-#    BELI (sudah diverifikasi silang terhadap kolom GROSS PROFIT bawaan file master -
-#    HARGA BELI di kedua format adalah harga beli TOTAL per baris, BUKAN per unit, jadi
-#    tidak perlu dikalikan QTY lagi).
+# Loader data Omset utama
 # --------------------------------------------------------------------------------------
 
 _FAKTUR_REQUIRED_COLS = ["TGL FAKTUR", "KATEGORI BARANG", "TOTAL HARGA"]
 
 
 def _find_data_sheet(wb):
-    """Cari sheet format lama: harus punya kolom CABANG + CORE_COLUMNS di baris header."""
     candidates = [n for n in wb.sheetnames if n.strip().lower() == MAIN_SHEET_NAME.lower()]
     candidates += [n for n in wb.sheetnames if n not in candidates]
     for name in candidates:
@@ -530,14 +502,8 @@ def _find_data_sheet(wb):
 
 def _detect_main_file_kind(file_bytes: bytes, filename: str):
     """Deteksi jenis file Omset ('per_branch' + nama cabang, atau 'master') TANPA parse
-    penuh isinya (cuma peek nama sheet + header, read_only=True, murah) - dipakai supaya
-    upload baru bisa otomatis menggantikan file lama untuk cabang/jenis yang sama.
-
-    Ini penting karena file Omset (baik format master maupun per-cabang) yang diexport
-    ulang biasanya berisi data KUMULATIF sejak awal periode s/d tanggal export terbaru,
-    bukan cuma data baru. Kalau file lama untuk cabang yang sama tetap disimpan berdampingan
-    dengan file baru, rentang tanggal yang tumpang tindih akan terhitung DOBEL saat
-    load_all_main_data() menjumlahkan semua file di folder."""
+    penuh isinya - dipakai untuk auto-replace saat upload baru DAN untuk _dedupe_main_files()
+    yang membersihkan sisa duplikat lama setiap kali app dijalankan."""
     try:
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception:  # noqa: BLE001
@@ -551,11 +517,59 @@ def _detect_main_file_kind(file_bytes: bytes, filename: str):
     return None, None
 
 
+def _dedupe_main_files(main_dir: str):
+    """Bersihkan file Omset yang sudah tidak relevan lagi: kalau ada lebih dari satu file
+    untuk cabang yang sama (format per-cabang) atau lebih dari satu file master, HANYA
+    file TERBARU yang dipertahankan - sisanya dihapus (lokal + GitHub). Ini perlu dijalankan
+    di SETIAP start-up (bukan cuma saat upload baru) karena:
+    1) Duplikat lama bisa sudah menumpuk dari sebelum proteksi upload-time ada.
+    2) Saat app restart, sync_data_from_github() menarik ULANG semua file yang masih
+       tersimpan di repo GitHub, termasuk duplikat lama yang belum sempat dihapus dari sana.
+    Return list nama file yang dihapus (untuk ditampilkan sebagai info ke user)."""
+    if not os.path.isdir(main_dir):
+        return []
+    files = sorted(f for f in os.listdir(main_dir) if f.lower().endswith(".xlsx"))
+    if len(files) <= 1:
+        return []
+
+    groups = {}
+    for fname in files:
+        fpath = os.path.join(main_dir, fname)
+        try:
+            with open(fpath, "rb") as f:
+                file_bytes = f.read()
+            kind, branch = _detect_main_file_kind(file_bytes, fname)
+        except Exception:  # noqa: BLE001
+            kind, branch = None, None
+        if kind is None:
+            continue
+        key = (kind, branch)
+        groups.setdefault(key, []).append(fname)
+
+    deleted = []
+    for key, fnames in groups.items():
+        if len(fnames) <= 1:
+            continue
+
+        def _sort_key(fname):
+            ts = _extract_filename_timestamp(fname)
+            if ts is not None:
+                return (1, ts)
+            return (0, os.path.getmtime(os.path.join(main_dir, fname)))
+
+        fnames_sorted = sorted(fnames, key=_sort_key)
+        keep = fnames_sorted[-1]
+        for fname in fnames_sorted[:-1]:
+            try:
+                os.remove(os.path.join(main_dir, fname))
+                github_delete_file(f"data/main/{fname}", f"Auto-dedupe: {fname} digantikan {keep}")
+                deleted.append(fname)
+            except Exception:  # noqa: BLE001
+                continue
+    return deleted
+
+
 def _extract_qty_gp(row, col_idx: dict, total: float):
-    """Ambil Qty & Gross Profit dari satu baris. Prioritas Gross Profit: pakai kolom
-    'GROSS PROFIT' bawaan file kalau ada (file master), kalau tidak dihitung dari
-    TOTAL HARGA - HARGA BELI (HARGA BELI di file ini adalah total per baris, bukan
-    per unit, jadi tidak dikalikan Qty lagi)."""
     qty_idx = col_idx.get("QTY")
     hargabeli_idx = col_idx.get("HARGA BELI")
     gp_idx = col_idx.get("GROSS PROFIT")
@@ -616,9 +630,6 @@ def _load_faktur_sheet(ws, filename_hint: str) -> pd.DataFrame:
 
 
 def _load_master_sheet(ws, col_idx, filename_hint: str) -> pd.DataFrame:
-    """Baca sheet format lama secara streaming (ws sudah dibuka read_only=True). Format ini
-    tidak pernah punya kolom KATEGORI PILAR, tapi tetap dicek (prefix match) untuk berjaga-
-    jaga kalau suatu saat kolom itu ditambahkan ke file master juga."""
     cabang_idx = col_idx["CABANG"]
     tgl_idx = col_idx["TGL FAKTUR"]
     barang_idx = col_idx["KATEGORI BARANG"]
@@ -657,8 +668,6 @@ def _load_master_sheet(ws, col_idx, filename_hint: str) -> pd.DataFrame:
 
 
 def _looks_like_ads_export(file_bytes: bytes) -> bool:
-    """Heuristik: file ini kemungkinan besar export Meta Ads Manager yang ke-upload di
-    slot yang salah (bukan slot Omset), supaya errornya tidak ditampilkan berisik."""
     try:
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         for name in wb.sheetnames:
@@ -676,9 +685,6 @@ def _looks_like_ads_export(file_bytes: bytes) -> bool:
 
 @st.cache_data(show_spinner=False)
 def load_main_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
-    """Auto-deteksi format: sheet 'Rincian Faktur Penjualan' (format baru, per cabang) ATAU
-    sheet format lama (Faktur Penjualan + kolom CABANG). Peek nama sheet dulu pakai
-    read_only=True (murah, tidak scan baris) untuk menentukan strategi parsing."""
     try:
         wb_peek = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
         sheetnames = wb_peek.sheetnames
@@ -700,7 +706,6 @@ def load_main_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
 
 
 def load_all_main_data(main_dir: str):
-    """Baca semua file .xlsx di folder main_dir (satu file = biasanya satu cabang) dan gabungkan."""
     files = sorted(f for f in os.listdir(main_dir) if f.lower().endswith(".xlsx"))
     frames = []
     errors = []
@@ -712,17 +717,16 @@ def load_all_main_data(main_dir: str):
             df = load_main_data(file_bytes, filename_hint=fname)
             if not df.empty:
                 frames.append(df)
-        except Exception as e:  # noqa: BLE001 - tampilkan apa adanya, jangan hentikan file lain
+        except Exception as e:  # noqa: BLE001
             if _looks_like_ads_export(file_bytes):
-                continue  # kemungkinan besar file export Meta Ads, ke-upload di slot yang salah - lewati diam-diam
+                continue
             errors.append(f"{fname}: {e}")
     combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return combined, errors
 
 
 # --------------------------------------------------------------------------------------
-# Loader data Iklan Meta Ads (export "Campaigns" dari Ads Manager)
-# Fokus: Messaging Conversations Started & Cost per Messaging Conversation Started
+# Loader data Iklan Meta Ads
 # --------------------------------------------------------------------------------------
 
 _ADS_REQUIRED_COLS = [
@@ -838,10 +842,6 @@ def aggregate_ads_by_branch(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def generate_ads_insights(df: pd.DataFrame):
-    """Rekomendasi otomatis berbasis data: bandingkan tiap campaign terhadap rata-rata
-    tertimbang Cost per Messaging Conversation, dan tandai campaign yang boros tanpa hasil.
-    Juga mendiagnosa dari sisi KONTEN: dibandingkan dengan CTR median, supaya rekomendasi
-    lebih spesifik (ganti creative vs benahi funnel/kecepatan respon admin)."""
     insights = []
     if df.empty:
         return insights, 0.0, 0.0, None
@@ -974,11 +974,6 @@ _CATEGORY_ACTION_PLANS = {
 
 
 def generate_sales_insights(board_df: pd.DataFrame, category_label: str, name_label: str = "CABANG"):
-    """Rekomendasi otomatis untuk setiap cabang/nama di sebuah scoreboard: tandai penurunan
-    rata-rata omset harian (bulan ini vs bulan lalu) dan pencapaian yang masih di bawah 85%.
-    Setiap insight menyimpan 'problem' (ringkasan masalah) terpisah dari 'online'/'offline'
-    (daftar rencana aksi per kategori) supaya bisa dirender rapi per bagian, bukan satu
-    paragraf panjang."""
     insights = []
     if board_df is None or board_df.empty or name_label not in board_df.columns:
         return insights
@@ -1032,8 +1027,6 @@ def generate_sales_insights(board_df: pd.DataFrame, category_label: str, name_la
 
 
 def generate_all_sales_insights(sb_service, sb_gadget, sb_all, sb_corp, selected_branches=None):
-    """Gabungkan insight dari scoreboard Service, Gadget & Aksesoris, dan Marketing Corporate
-    menjadi satu list (dipakai di tab Scoreboard & di export laporan)."""
     combined = []
     combined.extend(generate_sales_insights(sb_service, "Omset Service"))
     combined.extend(generate_sales_insights(sb_gadget, "Penjualan Gadget & Aksesoris"))
@@ -1067,8 +1060,6 @@ def _render_online_offline_html(online: list, offline: list) -> str:
 
 
 def render_structured_insight_card(item: dict) -> str:
-    """Kartu insight yang rapi: pernyataan masalah di atas, lalu rencana aksi Online &
-    Offline ditampilkan berdampingan sebagai bullet list terpisah (bukan satu paragraf)."""
     styles = {
         "bad": ("#fee2e2", "#991b1b", "#fca5a5", "🚨"),
         "warn": ("#fef9c3", "#854d0e", "#fde68a", "⚠️"),
@@ -1098,9 +1089,7 @@ def render_kpi_card_text(label: str, value_text: str, color1: str, color2: str, 
 
 
 # --------------------------------------------------------------------------------------
-# Loader data Walk-in (Rincian Pengiriman Pesanan) - satu file biasanya = satu cabang.
-# Walk-in dihitung dari jumlah NOMOR PENGIRIMAN PESANAN yang UNIK (bukan jumlah baris),
-# karena satu order/pengiriman bisa berisi beberapa baris/item.
+# Loader data Walk-in
 # --------------------------------------------------------------------------------------
 
 _WALKIN_REQUIRED_COLS = ["NOMOR PENGIRIMAN PESANAN", "TGL PENGIRIMAN"]
@@ -1124,8 +1113,6 @@ def _find_walkin_sheet(wb):
 
 @st.cache_data(show_spinner=False)
 def load_walkin_data(file_bytes: bytes, filename_hint: str = "") -> pd.DataFrame:
-    """File walk-in punya bug tag <dimension> yang salah (hanya deklarasikan 1 sel) di
-    beberapa export, jadi HARUS di-parse penuh (bukan read_only) supaya semua baris terbaca."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     ws, col_idx = _find_walkin_sheet(wb)
     if ws is None:
@@ -1170,10 +1157,6 @@ def load_all_walkin_data(walkin_dir: str):
 
 
 def aggregate_walkin_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    """Total walk-in (jumlah NOMOR PENGIRIMAN PESANAN unik) per cabang per bulan, plus
-    rata-rata walk-in per hari. Bulan yang paling baru di seluruh data dianggap 'bulan
-    berjalan' (dibagi hari yang sudah lewat sampai tanggal terakhir tercatat di bulan itu),
-    bulan-bulan sebelumnya dianggap sudah penuh sebulan (dibagi jumlah hari kalender)."""
     if df.empty:
         return pd.DataFrame(columns=["Cabang", "Tahun", "Bulan", "TotalWalkin", "HariEfektif", "RataRataPerHari"])
 
@@ -1213,9 +1196,6 @@ _WALKIN_ACTION_PLAN = {
 
 
 def generate_walkin_insights(agg_df: pd.DataFrame):
-    """Bandingkan rata-rata walk-in per hari bulan terakhir vs bulan sebelumnya, per cabang,
-    untuk mendeteksi penurunan trafik servis. Dipakai untuk laporan/insight, disusun dengan
-    struktur yang sama (problem + online/offline) seperti insight omset."""
     insights = []
     if agg_df.empty:
         return insights
@@ -1240,8 +1220,7 @@ def generate_walkin_insights(agg_df: pd.DataFrame):
 
 
 # --------------------------------------------------------------------------------------
-# Loader data Marketing Corporate manual (Tahun, Bulan, Cabang, Omset) - fallback
-# kalau sheet "Scoreboard" tidak ditemukan di file yang diupload
+# Loader data Marketing Corporate manual
 # --------------------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
@@ -1305,7 +1284,7 @@ def make_corporate_template() -> bytes:
 
 
 # --------------------------------------------------------------------------------------
-# Export laporan presentasi CEO (PPTX & PDF): Penyajian Data, Evaluasi, Perbaikan
+# Export laporan presentasi CEO (PPTX & PDF)
 # --------------------------------------------------------------------------------------
 
 _BRAND_DARK = RGBColor(0x1E, 0x3A, 0x8A)
@@ -1427,8 +1406,6 @@ def _build_report_sections(
     omset_all, omset_service, omset_gadget,
     ads_spend, ads_leads, walkin_total, walkin_konversi,
 ):
-    """Bangun struktur section laporan (dipakai bersama oleh generator PPTX & PDF):
-    setiap section punya 'heading' dan 'body' (list baris teks)."""
     penyajian = [
         f"Omset All: {format_rupiah(omset_all)}",
         f"Omset Service: {format_rupiah(omset_service)}",
@@ -1523,19 +1500,10 @@ def generate_pdf_report(sections: dict, periode_label: str) -> bytes:
 
 
 # --------------------------------------------------------------------------------------
-# Scoreboard: Omset per kelompok (Service / Gadget & Aksesoris / All), dengan
-# perbandingan periode bulan lalu (s/d tanggal yang sama) vs bulan ini, dan pencapaian
-# terhadap target (SMM = Sesuai Masih Mungkin / expected value harian x hari berjalan).
-#
-# PENTING: target MFlash ditetapkan per KUARTAL (3 bulan sekali: Jan-Mar, Apr-Jun,
-# Jul-Sep, Okt-Des) - BUKAN per bulan. Jadi EXPECTED VALUE & OMSET S/D HARI INI (yang
-# jadi basis % PENCAPAIAN) dihitung kumulatif sejak AWAL KUARTAL s/d tanggal acuan.
-# Kolom PERIODE BULAN LALU/PERIODE BULAN INI tetap dihitung per bulan - itu cuma
-# indikator tren rata-rata omset harian bulan-ke-bulan, tidak dipakai untuk % Pencapaian.
+# Scoreboard
 # --------------------------------------------------------------------------------------
 
 def _quarter_bounds(d: date):
-    """Kembalikan (tanggal_awal, tanggal_akhir) kuartal kalender yang memuat tanggal d."""
     q_start_month = ((d.month - 1) // 3) * 3 + 1
     start = date(d.year, q_start_month, 1)
     end_month = q_start_month + 2
@@ -1562,9 +1530,6 @@ def build_scoreboard(df: pd.DataFrame, kelompok: str, tanggal_acuan: date, selec
     days_in_bulan_lalu = calendar.monthrange(tahun_lalu, bulan_lalu)[1]
     hari_lalu_cutoff = min(hari_acuan, days_in_bulan_lalu)
 
-    # Bulan berjalan - HANYA dipakai untuk indikator tren rata-rata omset harian bulan-ke-
-    # bulan ("PERIODE BULAN LALU"/"PERIODE BULAN INI"), BUKAN untuk % Pencapaian terhadap
-    # target (target MFlash berlaku per kuartal, lihat _quarter_bounds()).
     ini_bulan = d[(d["Tahun"] == tahun_ini) & (d["Bulan"] == bulan_ini) & (d["Tanggal"].dt.day <= hari_acuan)]
     lalu = d[(d["Tahun"] == tahun_lalu) & (d["Bulan"] == bulan_lalu) & (d["Tanggal"].dt.day <= hari_lalu_cutoff)]
     lalu_full = d[(d["Tahun"] == tahun_lalu) & (d["Bulan"] == bulan_lalu)]
@@ -1573,8 +1538,6 @@ def build_scoreboard(df: pd.DataFrame, kelompok: str, tanggal_acuan: date, selec
     sum_lalu = lalu.groupby("Cabang")["Omset"].sum()
     sum_lalu_full = lalu_full.groupby("Cabang")["Omset"].sum()
 
-    # Kuartal berjalan (Jan-Mar/Apr-Jun/Jul-Sep/Okt-Des) - dasar untuk kolom "OMSET S/D
-    # HARI INI" yang dibandingkan dengan EXPECTED VALUE untuk hitung % Pencapaian.
     quarter_start, _ = _quarter_bounds(tanggal_acuan)
     qtd = d[(d["Tanggal"].dt.date >= quarter_start) & (d["Tanggal"].dt.date <= tanggal_acuan)]
     sum_qtd = qtd.groupby("Cabang")["Omset"].sum()
@@ -1596,10 +1559,6 @@ def build_scoreboard(df: pd.DataFrame, kelompok: str, tanggal_acuan: date, selec
 
 
 def _finalize_scoreboard(sb: pd.DataFrame, df_target: pd.DataFrame, target_col: str, tanggal_acuan: date) -> pd.DataFrame:
-    """Tambahkan kolom TARGET & % PENCAPAIAN (Sesuai Masih Mungkin) dan baris total SMM.
-    TARGET diasumsikan sudah berupa total 1 KUARTAL PENUH (3 bulan) - EXPECTED VALUE
-    dihitung dari rata-rata harian target kuartal dikali jumlah hari yang sudah berjalan
-    sejak awal kuartal s/d tanggal acuan (bukan dari awal bulan)."""
     if sb.empty:
         return sb
     quarter_start, quarter_end = _quarter_bounds(tanggal_acuan)
@@ -1651,9 +1610,6 @@ def build_scoreboard_corporate_manual(df_corp: pd.DataFrame, df_target: pd.DataF
     sum_ini = ini.groupby("Cabang")["Omset"].sum()
     sum_lalu = lalu.groupby("Cabang")["Omset"].sum()
 
-    # Data Corporate hanya beresolusi bulanan (Tahun/Bulan, bukan tanggal harian), jadi
-    # kumulatif kuartal-berjalan dijumlah dari semua bulan sejak awal kuartal s/d bulan
-    # berjalan (tahun yang sama) - dipakai sebagai basis % Pencapaian terhadap target kuartal.
     quarter_start, _ = _quarter_bounds(tanggal_acuan)
     qtd = d[(d["Tahun"] == quarter_start.year) & (d["Bulan"] >= quarter_start.month) & (d["Bulan"] <= bulan_ini)]
     sum_qtd = qtd.groupby("Cabang")["Omset"].sum()
@@ -1750,7 +1706,6 @@ def pencapaian_color(pct):
 
 
 def render_progress_ring(pct, track_color: str = "#e5e7eb"):
-    """Donut ring persentase pencapaian (0-100%+), dipakai untuk ring KPI di tab Ringkasan."""
     if pct is None or pd.isna(pct):
         pct_display, pct_frac = 0.0, 0.0
     else:
@@ -1849,8 +1804,6 @@ def render_kpi_card(label: str, value: float, color1: str, color2: str, icon: st
 # --------------------------------------------------------------------------------------
 
 def build_pilar_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    """Omset, Gross Profit & Qty per Pilar bulan berjalan (s/d tanggal acuan) vs bulan lalu
-    (s/d tanggal yang sama), dipakai untuk KPI card & indikator tren naik/turun per pilar."""
     empty = pd.DataFrame(columns=["Pilar", "OmsetBulanIni", "OmsetBulanLalu", "PctChange", "GrossProfitBulanIni", "QtyBulanIni"])
     if df is None or df.empty or "Pilar" not in df.columns:
         return empty
@@ -1890,8 +1843,6 @@ def build_pilar_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches
 
 
 def build_pilar_by_branch(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    """Cross-tab Cabang x Pilar untuk omset bulan berjalan (s/d tanggal acuan), plus baris
-    & kolom TOTAL."""
     if df is None or df.empty or "Pilar" not in df.columns:
         return pd.DataFrame()
     d = df.copy()
@@ -1923,9 +1874,6 @@ def build_pilar_by_branch(df: pd.DataFrame, tanggal_acuan: date, selected_branch
 
 
 def generate_pilar_insights(pilar_by_branch: pd.DataFrame) -> list:
-    """Insight kualitas data: tandai cabang dengan porsi omset 'Belum Dikategorikan' yang
-    tinggi (>= 40% dari total omset cabang tsb) supaya diingatkan mengisi kolom KATEGORI
-    PILAR dengan lebih rapi di faktur penjualan."""
     insights = []
     if pilar_by_branch.empty or "Belum Dikategorikan" not in pilar_by_branch.columns:
         return insights
@@ -2012,9 +1960,6 @@ def render_pilar_table_html(pilar_by_branch: pd.DataFrame) -> str:
 
 
 def render_pilar_summary_table_html(pilar_summary: pd.DataFrame) -> str:
-    """Tabel ringkas per Pilar: Omset, Gross Profit, Margin %, dan Qty (Qty relevan
-    terutama untuk Penyewaan Corporate & Maintenance Corporate, tapi ditampilkan untuk
-    semua pilar supaya konsisten)."""
     if pilar_summary.empty:
         return "<p>Tidak ada data untuk periode ini.</p>"
     cols = ["Pilar", "Omset", "Gross Profit", "Margin %", "Qty"]
@@ -2046,7 +1991,7 @@ def render_pilar_summary_table_html(pilar_summary: pd.DataFrame) -> str:
 
 
 # --------------------------------------------------------------------------------------
-# Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet "Scoreboard" (kalau ada)
+# Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet "Scoreboard"
 # --------------------------------------------------------------------------------------
 
 _SECTION_PATTERN = re.compile(r"SCOREBOARD\s+OMSET\s+(SERVICE|GADGET.*AKSESORIS|MARKETING\s+CORPORATE)", re.IGNORECASE)
@@ -2059,10 +2004,6 @@ def _empty_target_df() -> pd.DataFrame:
 
 
 def _has_target_signal(df: pd.DataFrame) -> bool:
-    """True kalau df target punya minimal satu angka target > 0 di salah satu kolom
-    (TargetService/TargetGadget/TargetAll/TargetCorp). Dipakai untuk membedakan hasil
-    auto-ekstrak yang BENERAN nemu target vs yang cuma nemu baris CABANG kosong (0 semua) -
-    supaya file Target manual yang diupload user tidak diabaikan begitu saja."""
     if df is None or df.empty:
         return False
     numeric_cols = [c for c in _TARGET_DF_COLUMNS if c != "CABANG" and c in df.columns]
@@ -2072,8 +2013,6 @@ def _has_target_signal(df: pd.DataFrame) -> bool:
 
 
 def _read_scoreboard_sections(wb):
-    """Cari sheet 'Scoreboard' dan kembalikan dict {section_key: list of rows (as tuples)}
-    berdasarkan header section 'SCOREBOARD OMSET SERVICE/GADGET.../MARKETING CORPORATE'."""
     sheet_name = next((n for n in wb.sheetnames if n.strip().lower() == "scoreboard"), None)
     if sheet_name is None:
         return {}
@@ -2226,8 +2165,7 @@ def extract_scoreboard_corporate_all(main_dir: str):
 
 
 # --------------------------------------------------------------------------------------
-# Ledger permanen (histori upload) - supaya progres harian & histori bulanan tidak
-# hilang meski file lama diganti/dihapus dari sidebar
+# Ledger permanen (histori upload)
 # --------------------------------------------------------------------------------------
 
 _HISTORY_LOG_COLUMNS = ["Cabang", "Tanggal", "Tahun", "Bulan", "Kelompok", "Omset"]
@@ -2281,9 +2219,7 @@ def compute_corp_hari_ini(corp_log: pd.DataFrame, tanggal_acuan: date) -> pd.Dat
 
 
 # --------------------------------------------------------------------------------------
-# Loader Target manual (dipakai kalau file yang diupload tidak punya kolom TARGET
-# di sheet Scoreboard). Nilai TARGET yang diinput di sini juga diasumsikan sebagai total
-# 1 KUARTAL PENUH (3 bulan), sama seperti target yang diekstrak otomatis dari file Excel.
+# Loader Target manual
 # --------------------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
@@ -2294,8 +2230,6 @@ def load_target_data(file_bytes: bytes) -> pd.DataFrame:
         raise ValueError("Kolom CABANG tidak ditemukan di file Target.")
     df = pd.DataFrame()
     df["CABANG"] = raw["CABANG"].astype(str).str.strip().str.upper()
-    # Pakai startswith (bukan exact match) supaya header dengan sufiks seperti
-    # "TARGET SERVICE (PER KUARTAL)" tetap terdeteksi sebagai kolom "TARGET SERVICE".
     for src, dst in [("TARGET SERVICE", "TargetService"), ("TARGET GADGET", "TargetGadget"),
                       ("TARGET ALL", "TargetAll"), ("TARGET CORPORATE", "TargetCorp"), ("TARGET CORP", "TargetCorp")]:
         if dst in df.columns:
@@ -2348,6 +2282,16 @@ if "_gh_synced_v1" not in st.session_state:
 if "_gh_warnings" not in st.session_state:
     st.session_state["_gh_warnings"] = set()
 
+# Auto-dedupe dijalankan setiap kali app start/reload (bukan cuma saat upload baru) -
+# supaya duplikat lama yang mungkin sudah menumpuk (dari sebelum proteksi upload-time ada,
+# atau ke-restore ulang dari GitHub saat restart) otomatis dibersihkan.
+if "_main_deduped_v1" not in st.session_state:
+    _deduped_files = _dedupe_main_files(MAIN_DATA_DIR)
+    st.session_state["_main_deduped_v1"] = True
+    st.session_state["_deduped_files_msg"] = _deduped_files
+else:
+    _deduped_files = st.session_state.get("_deduped_files_msg", [])
+
 logo_col, title_col = st.columns([1, 4])
 with logo_col:
     if LOGO_BASE64 and "PLACEHOLDER" not in LOGO_BASE64:
@@ -2355,6 +2299,13 @@ with logo_col:
 with title_col:
     st.markdown("## Dashboard Omset MFlash")
     st.caption("Monitoring Omset, Iklan, Walk-in & 6 Pilar — 18 Cabang")
+
+if _deduped_files:
+    st.info(
+        f"🧹 {len(_deduped_files)} file Omset duplikat/kedaluwarsa terdeteksi & otomatis "
+        f"dibersihkan supaya omset tidak terhitung dobel (file yang dipertahankan selalu "
+        f"yang paling baru per cabang): " + ", ".join(_deduped_files)
+    )
 
 # ---------------------------- Sidebar: Kelola Data ----------------------------
 with st.sidebar:
@@ -2380,8 +2331,6 @@ with st.sidebar:
             file_bytes = bytes(uf.getbuffer())
             kind, branch = _detect_main_file_kind(file_bytes, fname)
 
-            # Auto-replace: hapus file lama dengan jenis (master) atau cabang (per_branch)
-            # yang sama supaya data yang tumpang tindih tidak dijumlahkan dobel.
             if kind in ("per_branch", "master"):
                 for existing_fname in sorted(os.listdir(MAIN_DATA_DIR)):
                     if not existing_fname.lower().endswith(".xlsx") or existing_fname == fname:
@@ -2530,10 +2479,6 @@ if _all_errors:
             st.caption(e)
 
 # ---------------------------- Resolusi Target & Scoreboard Corporate ----------------------------
-# Prioritas TARGET: file manual yang diupload user (kalau isinya beneran ada angka target)
-# SELALU menang dibanding hasil auto-ekstrak dari sheet Scoreboard - supaya auto-ekstrak
-# yang "nemu" baris CABANG tapi gagal membaca kolom TARGET (jadi 0 semua) tidak diam-diam
-# menutupi/mengabaikan target manual yang sudah user upload dengan benar.
 df_target_auto = extract_scoreboard_target_all(MAIN_DATA_DIR)
 
 df_target_manual = _empty_target_df()
@@ -2563,12 +2508,6 @@ if os.path.exists(CORPORATE_DATA_PATH):
 
 df_corp = corp_scoreboard_df if not corp_scoreboard_df.empty else df_corp_manual
 
-# PENTING: dashboard TIDAK boleh berhenti render total (st.stop()) hanya karena data
-# Omset belum ada - kalau user cuma upload Walk-in/Iklan/Corporate dulu, tab-tab lain
-# (Iklan, Walk-in) harus tetap bisa dipakai. Tab Ringkasan, Scoreboard, & 6 Pilar yang
-# memang tergantung data Omset akan menampilkan status kosong secara wajar (sudah
-# ditangani masing-masing lewat pengecekan .empty di dalam tab), bukan menghentikan
-# seluruh app.
 if df_main.empty:
     st.info(
         "ℹ️ Data Omset belum diupload — tab **Ringkasan**, **Scoreboard**, & **6 Pilar** akan "
@@ -2594,9 +2533,6 @@ with f1:
         max_date = date.today()
     tanggal_acuan = st.date_input("Tanggal Acuan", value=max_date, key="tanggal_acuan")
 with f2:
-    # Gabungkan opsi cabang dari SEMUA sumber data (Omset/Iklan/Walk-in/Corporate) -
-    # bukan cuma df_main - supaya filter cabang tetap berfungsi walau data Omset belum
-    # diupload sama sekali (mis. user baru upload Walk-in atau Iklan duluan).
     branch_pool = set()
     if not df_main.empty:
         branch_pool |= set(df_main["Cabang"].dropna().unique().tolist())
@@ -2612,10 +2548,6 @@ with f2:
 selected_branches = selected_branches or None
 periode_label = f"{BULAN_ID[tanggal_acuan.month - 1]} {tanggal_acuan.year} (s/d tanggal {tanggal_acuan.day})"
 
-# Guard dengan `not df_x.empty` di semua baris (bukan cuma ads/walkin) - kalau data Omset
-# belum diupload, df_main benar-benar kosong (0 kolom), jadi df_main["Cabang"] akan error
-# (KeyError) kalau tidak dijaga, terutama saat user memilih cabang dari data Iklan/Walk-in
-# yang sudah ada duluan.
 df_main_f = df_main[df_main["Cabang"].isin(selected_branches)] if selected_branches and not df_main.empty else df_main
 df_ads_f = df_ads[df_ads["Cabang"].isin(selected_branches)] if selected_branches and not df_ads.empty else df_ads
 df_walkin_f = df_walkin[df_walkin["Cabang"].isin(selected_branches)] if selected_branches and not df_walkin.empty else df_walkin
@@ -2676,9 +2608,6 @@ with tab1:
     r1, r2, r3 = st.columns(3)
     with r1:
         st.markdown("<div style='text-align:center;font-size:13px;color:#374151;font-weight:600;'>🛠️ Omset Service</div>", unsafe_allow_html=True)
-        # key eksplisit WAJIB: dua ring bisa menghasilkan JSON Plotly identik (mis. % sama
-        # persis) sehingga auto-generated element ID Streamlit bertabrakan
-        # (StreamlitDuplicateElementId) kalau key tidak diberikan.
         st.plotly_chart(render_progress_ring(_pct_and_target_ratio(smm_service)), use_container_width=True, key="ring_service")
     with r2:
         st.markdown("<div style='text-align:center;font-size:13px;color:#374151;font-weight:600;'>📱 Gadget & Aksesoris</div>", unsafe_allow_html=True)
