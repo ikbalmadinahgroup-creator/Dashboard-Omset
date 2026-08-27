@@ -1,47 +1,5 @@
 """Dashboard Omset MFlash - Streamlit dashboard untuk monitoring Omset, Iklan, Walk-in,
-dan 6 Pilar MFlash, 18 cabang MFlash.
-
-Fitur utama:
-- Tab Ringkasan, Scoreboard, Iklan, Walk-in, 6 Pilar
-- Auto-deteksi 2 format file Omset utama: file master (sheet Faktur Penjualan +
-  Scoreboard) ATAU file per-cabang "Rincian Faktur Penjualan" (bisa banyak file sekaligus)
-- PENTING - Auto-dedupe file lama: file Omset (master maupun per-cabang) yang diexport
-  ulang biasanya berisi data KUMULATIF dari awal periode s/d tanggal export terbaru, bukan
-  cuma data baru. Kalau file lama untuk cabang/jenis yang sama tetap tersimpan berdampingan
-  dengan file baru, omset akan terhitung DOBEL. Ada 2 lapis proteksi:
-  1) Saat upload baru di sidebar, file lama dengan cabang/jenis yang sama langsung dihapus
-     (lihat _detect_main_file_kind() dan blok upload di sidebar).
-  2) Setiap kali app dijalankan/reload, _dedupe_main_files() memindai ULANG semua file yang
-     ada di folder data/main (termasuk yang baru disinkron dari GitHub saat restart) dan
-     otomatis membersihkan sisa-sisa duplikat lama yang mungkin masih tersimpan dari
-     sebelum proteksi #1 ada, dengan menyimpan hanya file TERBARU per cabang/jenis
-     (berdasarkan timestamp yang tertanam di nama file, fallback ke waktu modifikasi file).
-- 6 Pilar MFlash: klasifikasi omset dari kolom KATEGORI PILAR yang HANYA ada di file
-  per-cabang (Rincian Faktur Penjualan), tidak ada di file master lama. PENTING: nama
-  kolom ini TIDAK seragam antar file - kadang "KATEGORI PILAR Sales Invoice", kadang
-  "KATEGORI PILAR Faktur Penjualan" - jadi dideteksi dengan cara mencari kolom mana pun
-  yang diawali "KATEGORI PILAR", bukan exact match ke satu nama saja (lihat
-  _find_pilar_column_index()). Setiap Pilar juga dilengkapi Gross Profit (TOTAL HARGA -
-  HARGA BELI, atau kolom GROSS PROFIT yang sudah dihitung di file master kalau ada) dan
-  Qty khusus untuk Pilar Penyewaan Corporate & Maintenance Corporate.
-- Tab Walk-in: tabel Jumlah & Rata-rata Walk-in per Cabang dengan styling kotak & warna
-  (hijau kalau di atas rata-rata semua cabang, merah kalau di bawah), bisa didownload
-  sebagai JPG (matplotlib) maupun PDF (reportlab), plus insight & rekomendasi program
-  marketing untuk cabang yang walk-in-nya di bawah rata-rata.
-- Auto-ekstrak Target & Scoreboard Marketing Corporate dari sheet Scoreboard (kalau ada),
-  dengan fallback ke file Target manual yang diupload - file manual DIPRIORITASKAN kalau
-  auto-ekstrak gagal menemukan angka target yang valid (lihat _has_target_signal())
-- Target MFlash berlaku per KUARTAL (Jan-Mar/Apr-Jun/Jul-Sep/Okt-Des), % Pencapaian
-  dihitung kumulatif sejak awal kuartal s/d tanggal acuan (bukan per bulan)
-- Insight & Rekomendasi Perbaikan yang dikelompokkan rapi per kategori, dengan rencana
-  aksi Online/Offline terpisah
-- Export laporan presentasi CEO (PPTX & PDF): Penyajian Data, Evaluasi, Perbaikan
-- Ledger permanen (histori upload) supaya grafik riwayat pencapaian harian tidak hilang
-  meski file lama diganti/dihapus
-- Auto-backup semua file yang diupload ke repo GitHub (opsional, lihat README) supaya
-  data tidak hilang saat app di Streamlit Community Cloud sleep/restart/redeploy
-- Dashboard TIDAK berhenti render total kalau data Omset belum diupload - tab Iklan &
-  Walk-in tetap bisa dipakai independen
+6 Pilar MFlash, dan Kontribusi Marketing Corporate vs Sales Retail, 18 cabang MFlash.
 """
 
 import base64
@@ -73,7 +31,7 @@ from reportlab.platypus import (
 
 
 # --------------------------------------------------------------------------------------
-# Logo / favicon (base64, disematkan langsung supaya tidak tergantung file eksternal)
+# Logo / favicon
 # --------------------------------------------------------------------------------------
 
 LOGO_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAASwAAADUCAYAAAAmyx61AAAuOElEQVR4nO3de3xV1Zk38N/zrL3PyUlCIDcuigIB0SLiJQlQGYvW1mI7fWvbwUoSsLaOTm2tCt6mtkOZttrqCFqr0zq1rUJAzbS+tdV2pq2XvtYCId6LlqsoipAb5HZyztlrPe8fJ8EASUhCknOQ5/v5xA+es7PXs5N9nqzbXgtQSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUOtpRqgNQKTR3rjd2X1GuNW05jjzPM16s3U/s2/fc6sZUh9ZJAGq655S8UMKOJEr44owNnDRlt5zQQMueDVIdnxpemrCOMeOKFxQkyHwMkE8I4UwAx0GQTQQjkASAJgLvEGAdkzwZ5vj/27m2KjqcMcpPxmXG2iJzAXzSAbNEcCIIIwTiQcgxSQtA7xLTiyzy+1jg/THn+k11wxmjSg1NWMeIguLyccT0NQEWEfN4gCDiAAggXQ4kgEAAcfJ9kVcFdF/EtD841Ilr1x1jskb52ZcB8hXDNM03QOAA6wTSJUYiwBDBGEAESASyUwQPWQl+lL34rV1DGaNKLU1Yx4D8krKFxPw9InOCiMUBn/7DIQYRQ5xdT84uqa1Z89xQxNh8x+Rz/ZDcGfborMACcdv3GD0mhDwgHuAta+03Mxe/uXIoYlSppwnrA2zKlHnhvbn5dxLxVwUAxA34XMQGIq5NnNxQv6HyvkELEkDz8qJrQoa+bxgZsaAfyfQgviEQAYlA7t3JvGTqNVtigximSgOasD6gJsy9NKOl1T7IxlwsbpD6polAIFgX3NKwYc2tg3HK5jsnfTsS4qWBE9iB59P9iIBIiNAWd4/saXRfnLRsR/uRn1WlC051AGpIUEtr8MNBTVYAIAIRgWHvewUlZVcc6ema75z0tUiIlybs4CQrINnabYsJMkP8hdGj+O7BOatKF1rD+gAqKCm7goz3E3F2aAoggkBaIXxuffXKDQM5xb4Vkz8cZvkTgMhgJauuiICwR4jG3T9nL97+08EvQaWCJqwPmMLiRZPF2HUA5ferc72fiA3EBWuzMv3zdjz7YL+aXXLn+EiU/T+HfS5pTwxdjB4DTlAH4tmRa7ZsHbKC1LDRJuEHyfz5xrG9h8gMabICAHEWxP7slrbg5v5+bwv7/xoJDW2yApJTIsIeFThr75FHYYa0MDUsNGF9gBS+GbqK2Vw4ZE3Bg4izIOCmwpIvnN3X72lbXjQnxHTDUCerTtGEIBLiC1t2Tr5qWApUQ0qbhB8QuSUV0w3hORBGDnXtqitiA2eDlxHKOKf++Z8193as/PTkEW3NiefCHs04kukL/WUYEMG+IIF/GHHDtteGrWA16LSG9QEwZcq8MEPuJeZhTVZAspbFxj+d4rGlhzs22pxYlhka3mQFADbZNBxJBvduuntKeFgLV4NKE9YHwN5RuUvYeB8ZrqbgwcRZgOnreSVlH+vpmJblEy8wjKuHqyl4sGhCkBWmjxxn7ZKUBKAGhTYJj3L5JeWlxPQMgMzhrl0dgBgQ+XvcxM5uWlvV0PWtffecku8Fsb+GPD4pPsy1q65M8m5vs5Bzs67dXp2yQNSAaQ3rKDZmRkUWAfcRcWqTFQCIA7E5OWRDt3V9+eml8LwgfldmhklpsgIAK4DvUaYI7tt1x5islAajBkQT1lHMhtw3yXglqWoKHkxcABBdXjhz4fzO187FXBDwSizu9po0uNvaE4KsEJfkmKxbUh2L6r80uIXUQBSULJwL5sXpkqw6ERkW52YBgCwFv52z1c+8btsdgchCAuKUBp0Q7QmBMVjSdOfEuamORfWPJqyj0MjTLx0F2PsIHDpwMatUIzgbRGNxvl9+Mi6zbVTRr8f64Zda755cnH3t9t8mnFSHTOozlhPAYwp5TPfKT4pGpjoe1XeasI5CfijxHTL+NJH0ql0lh3Ak2vz2cbtBnAfgH/1sMxVOSjqO2MOpz1cAgFggiIT41NZWfDfVsai+S5PbR/VVwayFn4TD44CY9KpddSInkAsaqiv/1Lpi8iJiN6XdueWj9ma1tY1sfynk0Yf6szjfUEquXAqbCPB/spdsezLV8ajD04R1FBl7xmWFCT++loiLjmQxviFFDHHyUsD43L71q7Z3viwCar1r0jcyQ/zdaDw9EhYAhAwhbmWbZZ6dc82W2lTHo3qnTcKjSMKL3cHspW+yAgBxYKYzPCfP55eWPVAwc9EPC4rLFxBBsvZG7miLybMRP33+TsatIDNERcba21Mdizq89LlzVK8KSssvJuKHRdzR8TsjAhEna1w2sVec+3B9zZo3mpdPPtU38hyAUUOxDtZAEAEek8QCe8mIxW8+mup4VM+0hnUUyJtZPh7ACjma/sCIQJyF2ASIzSgi+hGKr/BHLN76t0Qg3/LTYLSwU8ecW/KYl7fePWV8isNRvdCElf6IRO4i9o5L66ZgL8RZkPHPz6eWawAg+4Tt/9ked09GQumTtBJWkOHT8c66u0SOoj8MxxhNWGmuoKT8Mmbv84O6NnsKiFiAeGlBySVn0sWwDHt1LO5qvTS6A6NxQcSnz7feNemyVMeiupdGt4s6WOHsiikg+oEcpTWrA4iAmbMBvm/87PmRyOK3tlmhGwxT2lRnBMlNWw3RD/beOXlKquNRh9KEla7mzvVc4O4h5oKUP9g8SDqahrOj1r8ZALIWb3uoPXCPplPTsHNZZZ/cPU8vhZfqeNSBNGGlqYLW477KxpuXbs8KHqnkssp8Y2Fx2RwChJy3uD3udqZTJ3zHssrzSkYV6bLKaSZ97hK13+jistMc83Mg5HxQalddJZdVti8jFD6n/vmfNbfeNenzHnOVdULpcrnJZZWliUFzwtfqssrpQmtYaWbKlKvDlnAvMX8gkxXQuayydzri0WUAkHXt9l8Ggfw8nSaUWgeEPM5JCO4TXVY5bWjCSjN7cxuuZ+Of80FrCh5MnAWRuTqvuOLjAGCdd1M04bakw2oOnZJrZ9E5rc5en+pYVFL63B0KecULZrIxT0OQ2fcHmwnp+RB0HxBDnNsUJz67uXplfcudk+f5vvzGOnjpUrlkAojQZgM5L2vJ9vWpjudYpzWsNDFmRkUWMyeXO+4uARGD2IDYA1HHnqACC7hEcn1iev99NsnnTdKdOLDxpobE3QYA2Uu2/j4WyH2D2TQkev9rf7E9vN9dqU4AnykTpMsqpwMdtk0TNuS+RewXHzBBlBhEDHGBg8hmca5GgJcgtDkO2tVs/WZYsiD4GV4sN0LBCUyYBlAxgDOYeSyIIOKQrv1h4gIQ05fzSst/11Bd+dgIY77VFrMfDfs8faDbgXUmJ2uBRECIJwiBJVhLEEkmLOo4jlngGcD3BL4v8IyA6MAfV3sgyAxzsYtlfgtAv3e6VoPnKPgz/MGXX1x+Lhn+H4gkVxAlBhFBnNsGkSon9FhDzTkvAFcmOr9HBIzf5WWjMR6Czw6lTW3eJLS/3/O1NGdEyZZzQ4QFBPoksckRsemZuIgBcW/BYXZdTeWuphUTPxJi/oMIQq4f4RIBzgHtMUY0RognGLa7rsAeWtHMgOcJImGHSFjgecnsJkg2DZkQjzv6xIjrtj4zsAtVR0oTVoqNPP3SUb6f+AuxmSYiIDYQF7wO8Io6co9gfWUTAMiPJowNLP9DAD5HRGaIyHgCckQoBECEEGWgjli2ElAdzpCnMq56c13MAph6+aT8kdGrCfRlYs5Jxw59Yg/OJtbUb1hdDkBaVhTdmxWiq9r6sHZWZ6JqjTJao4wgoP2v91dnPmcGIhkO2ZkOvicQAcIeIRbIxjjsnNzrduzt/9nVkdKElWIFxWW3k+ffABE4cS0kcoeV+N2NNVX7ACB6V9H5BPmygD4eMlTAnBxydwK4LrUlAiVrAZysDbQnBET4GwSPhLP3PUCX178bmn7pKTmR4DYic5Eg/ZqJRAwr7nMN1ZWPtd1VdCIELzEjt7dlaIiAaDujqYWRCJIdUYN1U4skf57ZmQ7ZmTaZxHxCS9zdPuK67TcNUjGqHzRhpVDh7IopzsqLbPxsZxMvinP/0lCzZj0A7PuPyWdnePItIczrWBUT/Vk/igB4huAbIBZInQh+kjFx2w/oIjTnl5b9C8H8gAg56fScIpGBc8HL2Vn+7B3PPtjesrzovqwwfaW7WlZnrWpfi0FblCEydOMMIkDIF4zKsYiEBE7QDEtnRZZs3TI0Jaqe6ChhCom1VxovI1ts4pcJE/9YQ82a9XLn+Ej07qLbwp485Xs0z0nyUZH+LnYnSC6Z0vFhL8jw6Zb4m0XroysmfqK+evWPrciFIvImmc5RxdTfCiIWzN7pLdH4PABgopWxhNiDExEREASEukYPrW28/7WhQgTEE8nyWqKMjBCNCMhdMXQlqp6k/i49RhVOm58tQhUuaH+orjVe1rS2qqHtrqITYyb0RIZHNwsQjiZkUFpt1gFtcQEbOoWZf9N2V9HNezesel6cvRDOVTnrHoW4NygNklayQ5wqACDC9ELgsMXrstUOUXLkr26vQTxBwzZ7o3PksGGfwb4WBhM+L3fM0GkOwywN7tBjk42EPwzgz3Uu63JsrIo3/ceEUwj4n7BP57XFBf0ZHeureCBwAj/i020tK4puq69Z80bt+pUX129Y9YW6XaPPck6WpzppJadgYM7I08py6ZotMRFZ27lmVmfNqn6vQRAMX7I6WF0jIxY3k6LhljNSE8GxSxNWqnhoipO5CjX3JxpXTJjoe+bXYY9O6cuo2JFwgo65SNIEAK0rJs4KfjT5a/KtX4fqJ8VuFGc3pDRpiYCIxnCGnAIAzPRC58ROjwh7m1KbrIBkc7s96lFTM5cc9mA1qDRhpUjDulXrmqtX1suPpmWHwJUZPk2NJoZ+1I4IaEuIE6LfyNJpIRF+1GSZe9pacROqqixAz6a6P4vYEAtPBgCIbLcu2VJsjmJFNE57TRrctc4RmprNSamO41iTBr/6Y1trLHprZpjPHuqa1X4CGAIZh5HAxgAkNbbN7nWQv3UcUDB4zyYe+LhQ8rGivtxyBJCM6ThDgzEE61CVf/PWxQT5fjgN1lUWEQiSMarho4/mpFDz8qKPegZXtQ/jxqICIOwRtSfkKlqGv8ijkUva3k4Ujliy9R1Mmx8SorMGpbVFDDgXOGf/AJJnyKIeRMcL4QIimpMMpufrJqHkki4Mao+7nSTmOgCIh70ViAfzIh6f2z7AR3cGgwAgQihlARyjNGGliCydFmpB+62+IdM+DE3BrtoTgrBHZS3LJ+2hizdeB+AdAMDGqjiVlH1PRNbgCOboETEcZBMEV9ZvqHzmoLf/vaC0/GIQ7gNxfo87AYlEAcCK9QDv+hFLNr8DANOXbYxv+tcpX41b+ovh1O1tSAAYFE1N6ccuTVgp0pYb/XTE8KzhTladiABibD349boNqx/JLymfx8b74oB26iGGiLxLSHy6ruaRTXnF5RewoSshmAKgQUSq6qor78svLqsllidAFDm0piUAyS4AyA5GVuOGV9q6vjv1ti0bN//r1G9mGP6RHYrh1D4gIgiSMarhk/rOgGOUEzohVZ3HmSFCW9w9dnvj9vu6e98PQjc6F2wdSOd78qFt+fe66kc25ZeUX8WGnyQynwPRDGI+lz3v3vySsqr6mtXPEOSm7vq0xFkH4U0AQDe80krddKpN2XL6j9sT8kSGn8pb2G1MYeHHJE1YKcJGnm9PDP++874htCdkl3F8zbJl6LZB9d5LP68lkauT6231AxGcDeqDiDw6uqSsCITbARhxASCuYyfoAOz5/1RQUvbPtdWV94gNKom7VPSJAchOCYc391pUVZV1cF9PBG5P14mlw4EIaE+4wBGqh7VgpQkrVeoTiVetw2ZvGJcE7iwpsFicef3Wt3s7tm7D6t+J2PsOSCaHPT8BhB37nlvdKESfYvayuu2jSjYBLwaARAauFhe8QpxclJCIAcHT9c//rPlw5Z38/c3bnHM38iA+8NwXHhMc5PWE72sNa5hpwkqRE5fsjBLJw74ZvjIjIULMysoRS7Y93JfjnSS+JTb42/4VTvvBAfk9vikCgEYBwL7nVjfC4TIRty/Z/+VEiFb2tZzJ39/8UCyQR4ezaegzgUTWTF+2MT5shSoAmrBSiiw/EE1Iw3D0ZYUMIRqX7dlh9HlDheQSN+6rAhfvSx1GICDBhLyZ5TkCvNzjfK5ks++Nzv+tq6l8gcRdS2wg4p6vz9z5bF9jJEDCYVzXnnA7h6O2apjQFne1CTa/GPLC1CE0YaVQ5vVb33bWrQh7Q/tBIwIcxDmSr9NV2/b053vrNqx5VkTu7Gyy9UoEZLx8EilrcFm/dTZ4+ZAmJTHE2Zglubfry7XVq38hQfweBn0Xzz7br+HJCcv+/q5zuBYCGepHdjp29bl92q1v6AhhCuh6WCkmPxmXGW2L/CnDp9lD9WhOZpjQ3C4/ylm87eqBfP+44isyE9zyFLE367CrlRJBgPc84Gwr5INcJZEp6bzVxLk9Im5J/YbKVQOJpTebbp56f1bY/HNbfGgmZ0V8RjRh/+yFYp+YtGxH+5AUonqlNawUoyt3tQXWXhYP5N2hqGklpzDIMyNs9oA3T9hVc3+bOPmiOPfuYR+tEQETjw2ce7DORbZncPwjztrPOJEb4OxlVuIlQ5GsAABhd300bp+PDEF/VnJ5ZPeWsPuSJqvU0RpWmmhbMfnDhuVXnqGxgzWZNDNMaI/LWhu3n82+ccd7R3q+wpKKsx3hV8w85nA1reQa7fEf1m9Yc82Rltsff//GScd7ML/O8Ki4LTE4Na0Mj5Bw8o4TXDTl1r9vGJSTqgHRGlaayLxu618Tzl4YD+TVzHByffaB8jhZs2qPy68TgffpwUhWAFC7YdXz5OSTIvJasm+q5yDFBWD2rs4vKa8YjLL76uRbN78D8T7VHrgnIz7jSAY0mIDMECNu5UXnaJ4mq9TThJVGsq/b8VLchM6LxeU/CUhEQv1LXJ2JSgT10RhuyGjc9k8512+qG8wY62oqX/Di7R8VF9wPQqK3xCUQIqIfjp51yYzBjOFwJt/22u6obz4bS9h/BdCY6TNMP36QTMn+KiaKtSfknlYXOn/KbW+8NnQRq77SJmGaavuPyWcbX651ggszfMoWSS51bA/eKYeTicoJEA/kPZA8Aph7ItdsOeQ5wcFWWFw2R5ivFWAes8kGBCKCrtMZiA0kCP5GFP9YbXXVoNT0+mPjzadMDbF8nQn/5DONISJYJ7CCjliTjxMxAYaS/44FthmgJwLn7jr5+5vXDXfMqmeasNJc+11FJwnJBRCaC+AUERQKEAHgCNJKoF0CvALgT5bkqRHXbt893DEWzFpwklj+OJjmksiHRFBIhAwkM1grsVdrXfDdhg2rfzXcsXXavnTaWBfY8yFyPgSnOdA4EWSBQASJAqglotdJ5BnL7n+nfm/oE77qP01YRxF5eq6HF7bmIJSV0ZqISjzuteXetK0pOZMgTcxd6uXENub4MZNBbMQi3tZYU9WEwVsV8IiJgLbdXJRjTCiTfCGCaT8BhU20rH/zv5RSSimllFJKKTVstA9L9aqgeMEnhb2ZEOuB2EKkpn5D5W+QRn1SA5VfekkJ4P8jxHoACQAwG7E2/v8aah7+Q6rjU4fShDVMli4Ff/u4cRldX6Mrd7V1d+y44isy+3LOILuRXWJEl99hHdgPDyiR1D5b1XLwawXF5beQZ757yG3iErfWVq++ZSDlpIsxMyqygrB7iU14ygFrdhHB2USLDWT63hdX70hdhKo7mrCGQWz55FPFyH9BMDZwAAjwCbCQFyMhezld9VYj0PGQMbXcBzbniLOH/d0QoZslFKifCUsIYAGwzTF9tWHdytcBYOQ/lOV67XiD2Iw+8APNgLh9BO+U2uoHh31e1WAZM6NidBCS14kp75A15QVCJGfVVq9+KSXBqR7pJhTDICC3KDPTfDiICkyXFBMK8aS2NnkQwOMAEDOtMwz7l4oTcA/LuQxVO4yNN0GC2HcA/BMAUCtyYJB5SIkiEJGIoG0kgKM2YRH7AupxWQcH4qO+yftBpAlrGLDj38ejbqG1kte5yYtnSBJtsomsebHzuAzhzTEb/IVAxa6H5d4J5IHZ9Lg91gAlH2amcfvLYSME29OHVkg/0CoFNGENg8iSrU/vuqPojNwMjGJLEguEshhSF/ffK7zp7/vXLn+3emX9+NnzP94u3nhyjsCHJgVyyBLnlhLzRTLISUupdKcJa5iMu2HbHgCHXe1z59qqKIBed4zJK15wG4Mu6vVERCD0fQo8sQE5q4+jdCB2+tcgDWnCGk7FV/hHeooxibaQZfk8gXvZhYsg4vYIsLNvZ2XYIL7JSTCoI39jZlRkuUyMEyfjxCGXQb4D4iyugQ2/u9tm7kTN/YmBnj+3+IqRoLYTmGSMADkQJkPSZp1tEArvamxr3Y2NVf3fKCK5dXXW++XMH2n80GRYOc6JCQFoYsJbdZlvbevvcs7qyOgo4TAoKF04FST3QeS4Q3c57hcRogwCFfXW/U7swbnEXfXVqxf3vZv+wNHF3OKFJxqyr4F5xIExE0RcjMjOqKt+ZNPBZ8mbveh4tvZCAPMAnCmCccQUSW4BRp2d9hBIC4G2QfAHFvfgnprVr/YlyglzL81obU18BuAvgKQEwFgQ+9SxmLuIAOIAkSYQ7xTQX4mDH9StW3NArXXsGZcVJvz4RiIqOOR3QgyIfd6B7mfBbBBdCMgJRMwgSsYvLkqgjQR50HP7HthV89tup6iowaU1rOEg9kvsRc4X26fNZ/pwvj4kIWKH5J7vg1Dg4Y09Y35hwve/QdaVE3uFnUvNECSZpCAH5E4CZXfsBj3DCf1LQUnZPaP2Nnx7y5bfx3oqo7C4bE5r1K4g45UCgIhLnlPcoT8S5hyApjGbaWLdnJzZ8+c0ra1q6NPFiAPInG2Izk6W03ENneUl448QUTHIFCcw6gtjZl1asXvdg2/2/SemBkIX8BsGRPK0s7F6EbHi3BF9wTkLEZtsD4pLbpnVTVISGdbac+D5JWxC14JQKC5IjjpKR87slnTsBh0AkCzyQjc35ub9vKdmc2FpxTxh/h0Rl4qzHec/cO2tA0/fcX6bALE5JeRCH+7XBXXuVL3/Og6NXzriJzZzAhf8Kmf2/Lx+laH6TWtYw6C2es3/5JZ84UzfhHOBwdt7U8QjgS0BeDlAOal8WsaX7GfjQetLzHyG9DcOEYhNgNlfkE8tL9UDt3d9O//MS44TyAMgHtHtWvLEnbtOv7+AYNcqV/LfTf2+qL6G7wKw8c8MBfgG0Pd9H1X/acIaJo0bHnkbQK/bww/QywUlCz5Nxv9M1w8zQYa1M3hXzf1t+aUV/wGiVRAkk0hyw9SOWgosiAwxv9/PdBARCwjdUFh66UNdZ9GL4UuZveOStbGuOvut3DaBvAdHAYAcAOOIaEznXorOBQ/Xu6y1A7qwjtHWZN+V67E53hHbZQXF5XfW1VTqnoVDRBPWMBN5vzLQ4/sdelmYb/8xo0vKJlmiUw+sUTgIcHpeafmlBr01DRlWaGfDp4qewrJlRzyMn51pftnalriZTHi62Phb4twTgPuzE2wTUNQzPNK5YBZA/0LEUw5JWiJg9grEBp8E8LP9URLOPfTHRRBIKxNfZtrx5O5XKluTry/lccWb8hJE0wQ4w1na2dAW/y02VvZ7NJLYQGzQLMDfQBQFMIWIT+h2/psIyJg8EXsugDX9LUv1jY4SDpPW5ZM/E/JxQyJwEd+wiwfybKbhW+iaLTEAaFteNMcYfNeK5HTmnpBhG7PyeNbx226ji2Hzi8vPZUPLnCAb6PzQ0Indj3QRDruHIAgdNaD76ybGr0JV1f4q2kBHCfNnlp1H4DNiQg81V6+s767UvJnl41nojyA6+eCkRexBXLCyrrpyUedrBaVl64lMqRz0kLI42U2CMwdSo+l1lBAdycq5xwG6oa565SYAyJk9P88P/G8zm6u7S1rJ0dlgRX115eL+xqP6RmtYw0CWgtvIfdfzzXQCgwjIDFNJW4D/BrAWAITkm6EMc66Nv//hYQaMQ2n725MfBrZuIZalZEIfYWs7ht47R9+6qYiJJJtYh0UA5PK8HaG7G4CNR3qt9etXPw3g6d6OaVhfuTO/pPwBZnP7IR/85DVNPijGvckpEQceR0xjIPhrQWnZ7yH8gjBvZnZvoyn2Xu3GQ1ef6DNiiLOvUWu8vOt5mtZWNaD4iiUF0nouiE87tFkrADBhwOWqw9KENRyWQWQF/hQk5EOBFWOY0B641yXk3uw8RBw9FcTc+YGD3/m59ITgRJ6Petw5Q/5PzgVzIOIf4XyuLgQAsziMGqQTYvzs+ZFoEJpOTDNEUERw+SIU7nyfkv+Z3V1CFQgIyMHcud7+SZkifwHxx3HwRFkRgGgCkX9l56ijCyRKmaH38ksrNhLkKTL0eO3aVVv6Ez8RQ5x7oNukV3N/AiXl/0vMp3XfNHx/wqkafJqwhgEBIsdvX9L61pQHyaewYZJM399CX3tjf5Mpe8m2O2J3Ff3OkM2OBh2/GGaXyeaNrGu2NAFAXfXq744uLvt14HEmOwlDUAk244/sQWgC4ISY9h7RRSKZqNpt6Cvtjr5EJB8iMpycz2kOeUiop4735JswaDmZgGcBAFbMz9kmvsJsDt1xWgTSZXyBiCIgmsREkwD6lDj7bwWl5f9lYvTt3a+sau3LdYhYkOHeNk3t8QkC6rXPUB0pTVjDhC6GBba82Nsx4Wu3HXazzq4zwvNLytp6/HQQo3P2dy9RARA46x5omBj/O9YfrvSejSteUNBu+RFi76PSMf+qp1G9pL7XEBtrVr6VV1JW4UQeYvbGJUfrekrSnZM8O4ukkWT8620oPhnT5l/Sp0d1nHNgbu7pbaIen4lSQ0wTVirNn2/yt4euBPE573ei95HAAOj2UR8ihoj7g0AegfSStYiEhHbWT0r8sWuH+wBQgmkFGf+jYg8djEt2YFsIJNa5eykRZRxyYC8aNqz+45iZFXOs2OsguAhEJxB1rhnWZQPXQxbjS87xIuN/Ni8LZQ3AL/pwObp0TprShJVCedu8YvLMvQTCQAZsk82jbj5byWfhXqpbv/qBPp2out9FHyBvZvmHILhYbLdTv2Li7HIL9xsWbiDTUTWyMh/sfa8/zdnd61dtB/D1kaeVLfXDZoYgOBOEDwGYBOAEiBxH7OVItzPsBSRYgD4lLJWuNGGlELO3Fy7YC/ZHDegEHQ8Td0dAw/e7ta6EPD90cP9Sch6TXVO3ofIbB39L3qyK6oEuAbjv1dWNSHZwPdv52pQp88J1I/LGehx8DODbAcrrmrQ6KnYTp02bH9o4kBUcVFrQhJVCddUrN+UWl33EI3eGhdAho2A9sQAxFRJoMYiOdAWII8aE3O5riASQ1Hb7PdZ9lozX99CXLuX8J7ecR8IF5ElN7dpVW9ElI3U8NL0DwAP5JeVfY+Y86ebk8XizdoofxTRhpVhjshO9T0urHCy/uLyFPf5x3+ZbDR0hqu1uUn4yLl4wunTBY3uq16wFICNKF+aHIV8BcEW3zwV2p/gKv+CJzT8l4y0CAGdta0FpxasgeUlEtjBQb0FCgtFE8jEAMw6eckDJxwa29bYahEp/mrCOZoTxqQ4BAIil2tmgnYgzDug7EgGIxzvhpwtKyl4VoJ3gJhGb4/ucrAAUmtbzQN4iccm+KQJnEdFskJmdHFKQju2D9s/c7y5KgHjVEVymSgOasNKAPArT/HbR5REfJQkLMkaaowm+d9SSrVsAIK+k7HPEPA8i/P56TJIPwif788Hvd1w9T4wg6bJJRt26NZsLSssfJeMtOmSUUBwAChNzCXU8QNzfmJ1IEXMyGXVG1us8roODNT7Exh+vb01U9atglXY0YaWB9ncmnzMiAz8GAM8A8BmBdScB+MeRMysmscgaYi90YIdPTzWJQYtqH1GoCaDsA1feI0DQ4gfZByyGx2xvdBankvGLk6OFB8Uq7y/gR2QgzloQmb7Mx3LCz5G1UWIT6axl9UXnag1ig/9OtOOKrnOwxCUI6G5fx+TloIddiwBABKaXjrCezqkGgS7glwacSEt7QmLorM8kP5O7AcC30i4i3ayUSSD2evwSIHQkMTXWVO0jkVsBJLqeF8ku/++/99LPD+hM37Pu4d0mRp+EDX4GIJo83hz05QFgKy6ohJFZAtlKxu8udg/Z4/ZnpcYNq15z4ipE3AaBtHee69Dzm/fjFAQi7q/OSXld9eQvdIws7sd+ZguAncQHlW98ANJgjdftYAEACGgrIN383A0A6nUDEXVkdMQkTTQtL5qTYTDDipCQNLdH+fG8m7ftA4DckorpzDwHzhpQx6RGEWKCkS6PghBILJEYIQLjxdp1K5870rjyiitmEeMshnhO2LLYl2trVv+lt+/JLb3kVEPeBRCcBcgYJGvyjQJ6zcD+fk/1mr8CQEHJgrlE3gxL71cdjRABsrm2etXvDznx/Pkmf2fmSZRInC7gU4lkogAFBGQk12OmJgDvCPg1hl1bW514Feh5QmzBrAUnkTMfsxAPRAIRMkTOSbCuvvrhXh7NWcr5JZs+xeRN7IzdiBCEWuIJ89i+lx/c2+sPVSmllFJKKaWUUkoppZRSSimllFJKKaWOHYT583XmehrRR3OGjVBBafnlibhfNRwTC8fMqBhtQ7IAhnMQBDV1NVN/D3S/92B+6cIScsHoupo1Tx7uvCNKF+b3tH1XXxTMLD+HErSr9sXkxhC5JRXTjUjIguvISDkBCXKuCR5tgMWUuurKR3s6V96shR8Slzitsfrhg4+hgpKyeWDvTIjdk5Xprdrx7IPtXQ/ILy6/sj1Bj7W+smoPepBbUnGq2W6n1wEPD/R61eDShDVM8mZWzBKHhZ6faAewsvDMiinwaDJYxomj5+uqi7YUlGz+BBlvrBX7h4aW+J78SOhssBxHRPvq1lc+UTiz4nTnhbbV722OFURC0y3iW4n8UkN0PJi3ds5sL5w2PzsIyQ9g8JgAmwk0dfzsjeG2oGyOMd4JCGJ/rq15ZGtu6SWneuyVinMngHnXtGnzQ3sy/c+CSIj53dp1K5/LLamY7nlULDb+1wT5CR+4L1y84B72pCYIvBnGw3g492Igtj7Evrd7/artBbMWnOSEfXZuBkCS4SUe37m2KgoA4nABPDkNwEVYupTNE1vuFpYqcrKVBBlG3CNkrLNBaIKQKxo965IxVvwLRFxLw8T443k7QuOM8PlW7DuANBsx5xWWlkcgtLl2w6rnASC/eMHJIJRZx98wiBf47+TJmFmXTnSQ81xgt9fXVD4DwjTj8x/zSy85sb764Q0FxeXjyFGWsLQS8wXWybuGzKuAe2PMjIrRCV/OMB4dHzhebzgRl7i01r/48Lu5pZecSmSEHM4SQmuDy/otau7v96atqm/0WcJhwk4uIrKXg1CM4it857nPOLj5TniHwN48ZubWCQL24MSxwy15OZFCItwqgj0AlRSUll/snPs84rHjRub5WcK0yDPhiQz6hiN6W5y7omDWgpMAAJnhGYC8Xb+u8vGGdStfF9/bEGuCYUKGgKKOzS0FsxacxOAlDuZNACcRJNid6X8d4JFgbhHn/q2gZOGZDHeNg2kQmJtY7FiIa2Xn7xQxpxO5a5xghwiuY/EmW3FfwdKlDMtXknCmMEWF+bSo9b7Y+XMgoE6A9vzisvMKntj8CSHZA6CJ4AIIxokxZyQCHm2MtEMkIPEyk4kJ5+bvCH+andwoxB4MN5MjC0iRI3pbyH1ldElZEQAEEdoN0D5j7BcJXqQtd292YINvOuEdRLgwr7ji44A0e8aGRfhyALDCM5yRC4TlJgH5MNIcID7JCX3cZcgZTPIV58xbRuz1YnEKefwlFF/hM8yX2SIDzM1GcG6hablouO+tY4kmrGGQN7N8mhDOFvE+w8RTC7ntfACtJPLL+vUPPU2g7VaklERmgEgEkmfgIiC80LBh9R/F2kdEcBoIwmICjiYcxLE4YpA8Vb9+1VMi9AocjQMAy7KXCGM6y6cgWOyyMk4BcAYnn5vLFssfAuGN+nUPPkNCvxZBiIAJcS/233XrVj4JkW0QdwoIo2BjOQBvMvDqRfDOnhcfeqXjzE/Wr1/1lBB2sk87AWoueHLzlwHZxC7IgOOTiEwUkowLAAQIichPQbQAoPMJqGThMIwjIYrDodUYExMRIiJnIdNY5AQh0w7BOCeyimBHs5MLROwoISSvH/S3BHgsAOx7bnVjXXXl1cJcJXCL4mQXgbCzfv0vngLjt0Q4vWMnVun8ABgKDENInKwmcoXscAGDM4kpgDgC47f11Q/+CSS1BvQ3J8jK55YvU3Ij3HEs7kQh026Fxg7PXXVs0oQ1DFjkcwAtM8Y+5IxZLJDzSCgDwD8Xli68WiD5ztEOEMZbsUSgIEhQHIKzCkorvk7E1zjQ7wT0kiP7debwjQBlsNiAkNyUjwSWvOQuEA3rK1+H0Ov5JeV3F5QuXAzQSHLOidCJ1jmBCDPF15NgQkf5C4XQQuA1fuDfUlBa8U0QJlnynwPwjjGhEQSpr5vYvhUACkrKvyQioc6yAUmYmEuI4FER+lqMzC8d0SQiCYtLhIiwf1kXIlh2aATx/Zbsz8WhFdKxNrRITW31yv+pXb/q5eQ1SUwcJoiABUGIxFlD5gQhUydOJjJTmEDJ5leX688tXnhifknZd8i5c0CwsPQsCTIKZi26Bg5ljoLfAQyKJ/YJeE9h6aKbhKnCCQX7z08ygZwLk7UJErIkbAGAgAT53MJMT5Lgyxkm/htApu6P0UHXix9C2oc1DAj+T+uqH3yv4393j5lRcWcQcotIqEo89/cIEj/dWV0VHTOzYo91yPIC/0n2YiMc8wZr3dPi8Ou9L1buAIDc0ks2GaZ4nIL63Lrm1tqxeTsBIBGYn4/KNp0dy1K3ofKuwjMrpjjjchEK/1fd8z9rzi35wnd8plwAf9yzrmr3mBkVN9pMd7LE7C85xzahzZ9CzNXiYAg0tnHDL3aOmVFxi43gFDi8i6oq64rn/5vvmQnWZG6XIEYAkDCZPyRuyyeYM8TZ/5vslJdVo4vLp4vjaMCZ+5dqScS9n42ItMV2rl0dBYAxMyreTGRITSbbRKu1NZ3HRSLeS3v34o19U9uaC9/0TzPEj7vWWK0JZUcSvkwMs/nVuzbSNDLS8jwABDH56aisULQBQGPNyrfzZpb/WIiO89g9vqf64d3Tps1/bU9O1nQieqSxuvK9ccUL7t41xTZiW853CrzW01xgV3tR12hCiCT8rImhQB7bhRH7RgaxrEyvPh7jkR4A+DDL260bw4KTQbRm59qqKObOvaew7fjphvjxIByqG9q76dimy8ukSH7xglOMJ4171j28u7v3C+fOz5aW0NS6msoXhiumvNmLjifrzmWQJ879b11N5a6+fm9+SfnJxDzH2vZfNtZU7RvKOFOtoLj8LGKcFjbxRzsHE5RSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSSimllFJKKaWUUkoppZRSqfH/AXlTRJE7lZLQAAAAAElFTkSuQmCC"
@@ -96,9 +54,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# PENTING: hanya sembunyikan #MainMenu (hamburger menu) dan footer bawaan Streamlit -
-# JANGAN sentuh header/toolbar/decoration sama sekali, karena di versi Streamlit
-# terbaru tombol panah buka/tutup sidebar ("»") ikut berada di strip toolbar itu.
 st.markdown(
     """
     <style>
@@ -374,12 +329,6 @@ def classify_kategori(kategori_barang: str) -> str:
 
 
 def _extract_filename_timestamp(filename: str):
-    """Ekstrak timestamp YYMMDDHHMMSS yang tertanam di akhir nama file export (contoh
-    nyata: 'rincian_faktur_penjualan_001mflashklende_260826095209.xlsx' -> '260826095209').
-    Dipakai untuk menentukan file mana yang PALING BARU saat ada beberapa file untuk
-    cabang yang sama - lebih diandalkan daripada waktu modifikasi file (mtime), karena
-    mtime bisa ke-reset jadi sama untuk semua file saat disinkron ulang dari GitHub
-    ketika app restart. Return None kalau pola tidak ditemukan."""
     name = os.path.splitext(os.path.basename(filename))[0]
     m = re.search(r"(\d{12})$", name)
     return m.group(1) if m else None
@@ -483,12 +432,6 @@ def _to_float_or_none(v):
 # --------------------------------------------------------------------------------------
 # Kontribusi Marketing Corporate vs Sales Retail
 # --------------------------------------------------------------------------------------
-# Kolom "NAMA DEFAULT PENJUAL PELANGGAN FAKTUR PENJUALAN" (per-cabang) / "NAMA PENJUAL"
-# (master) biasanya berisi nama staf DEFAULT per cabang (mis. "ENDARWAN KLENDER",
-# "NIKO ALFA PRAMUDITA") - ini dihitung sebagai kontribusi Sales Retail. Tapi kalau isinya
-# adalah salah satu nama tim Marketing Corporate di bawah ini, transaksi itu dihitung
-# sebagai kontribusi Marketing Corporate. Selisih antara Omset total dan kontribusi
-# Marketing Corporate adalah kontribusi Sales Retail (sesuai definisi user).
 MARKETING_CORPORATE_NAMES = [
     "DICKY YUNIAWAN", "FAISAL ABDUL RAHMAN", "IQBAL SABARI SALES", "IQBAL SABARI",
     "IKBAL SABARI", "KOUTSAREZRA KANZA", "M SYAFAAT", "MUHAMMAD SYAFAAT",
@@ -502,10 +445,6 @@ _RETAIL_LABEL = "Sales Retail"
 
 
 def _find_penjual_column_index(col_idx: dict):
-    """Cari index kolom nama penjual. Prioritaskan 'NAMA PENJUAL' persis (kolom final yang
-    ada di beberapa file master), fallback ke kolom yang namanya mengandung 'DEFAULT
-    PENJUAL' (nama kolom asli di file per-cabang: 'Nama Default Penjual Pelanggan Faktur
-    Penjualan')."""
     for header, idx in col_idx.items():
         if header == "NAMA PENJUAL":
             return idx
@@ -552,9 +491,6 @@ def _find_data_sheet(wb):
 
 
 def _detect_main_file_kind(file_bytes: bytes, filename: str):
-    """Deteksi jenis file Omset ('per_branch' + nama cabang, atau 'master') TANPA parse
-    penuh isinya - dipakai untuk auto-replace saat upload baru DAN untuk _dedupe_main_files()
-    yang membersihkan sisa duplikat lama setiap kali app dijalankan."""
     try:
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception:  # noqa: BLE001
@@ -569,14 +505,6 @@ def _detect_main_file_kind(file_bytes: bytes, filename: str):
 
 
 def _dedupe_main_files(main_dir: str):
-    """Bersihkan file Omset yang sudah tidak relevan lagi: kalau ada lebih dari satu file
-    untuk cabang yang sama (format per-cabang) atau lebih dari satu file master, HANYA
-    file TERBARU yang dipertahankan - sisanya dihapus (lokal + GitHub). Ini perlu dijalankan
-    di SETIAP start-up (bukan cuma saat upload baru) karena:
-    1) Duplikat lama bisa sudah menumpuk dari sebelum proteksi upload-time ada.
-    2) Saat app restart, sync_data_from_github() menarik ULANG semua file yang masih
-       tersimpan di repo GitHub, termasuk duplikat lama yang belum sempat dihapus dari sana.
-    Return list nama file yang dihapus (untuk ditampilkan sebagai info ke user)."""
     if not os.path.isdir(main_dir):
         return []
     files = sorted(f for f in os.listdir(main_dir) if f.lower().endswith(".xlsx"))
@@ -1253,10 +1181,6 @@ def _walkin_overall_avg(d: pd.DataFrame):
 
 
 def render_walkin_table_html(latest_agg: pd.DataFrame) -> str:
-    """Tabel ringkas jumlah & rata-rata walk-in per cabang untuk bulan berjalan - diberi
-    bingkai kotak (border teal di sekeliling tabel) dan warna per baris: HIJAU kalau
-    rata-rata walk-in/hari cabang itu di atas atau sama dengan rata-rata SEMUA cabang,
-    MERAH kalau di bawahnya - supaya cabang yang tertinggal langsung kelihatan."""
     if latest_agg.empty:
         return "<p>Tidak ada data untuk periode ini.</p>"
     d = _walkin_ordered(latest_agg)
@@ -1298,8 +1222,6 @@ def render_walkin_table_html(latest_agg: pd.DataFrame) -> str:
 
 
 def generate_walkin_table_image(latest_agg: pd.DataFrame, periode_label: str = "") -> bytes:
-    """Render tabel Walk-in per Cabang sebagai gambar JPG (pakai matplotlib) supaya bisa
-    didownload & dibagikan langsung, misalnya untuk laporan/presentasi cepat."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1342,8 +1264,6 @@ def generate_walkin_table_image(latest_agg: pd.DataFrame, periode_label: str = "
 
 
 def generate_walkin_table_pdf(latest_agg: pd.DataFrame, periode_label: str = "") -> bytes:
-    """Render tabel Walk-in per Cabang sebagai PDF (pakai reportlab), dengan warna baris
-    yang sama seperti tampilan di dashboard (hijau/merah relatif ke rata-rata semua cabang)."""
     d = _walkin_ordered(latest_agg)
     overall_avg, total_walkin_sum, _ = _walkin_overall_avg(d)
 
@@ -1402,9 +1322,6 @@ _WALKIN_ACTION_PLAN = {
 
 
 def generate_walkin_marketing_insights(latest_agg: pd.DataFrame) -> list:
-    """Insight & rekomendasi PROGRAM MARKETING untuk cabang yang rata-rata walk-in/hari-nya
-    di bawah 85% rata-rata semua cabang pada bulan berjalan (dibandingkan ke sesama cabang,
-    bukan ke bulan lalu — melengkapi generate_walkin_insights() yang sudah ada)."""
     insights = []
     if latest_agg.empty:
         return insights
@@ -2244,8 +2161,6 @@ def _mc_filter_bulan_berjalan(df: pd.DataFrame, tanggal_acuan: date, selected_br
 
 
 def build_mc_contribution_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    """Kontribusi Marketing Corporate vs Sales Retail (selisihnya) terhadap Omset All,
-    Omset Service, dan Penjualan Gadget & Aksesoris, untuk bulan berjalan s/d tanggal acuan."""
     empty = pd.DataFrame(columns=["Kategori", "OmsetTotal", "OmsetMC", "OmsetRetail", "PctMC"])
     if df is None or df.empty or "KelompokPenjual" not in df.columns:
         return empty
@@ -2265,8 +2180,6 @@ def build_mc_contribution_summary(df: pd.DataFrame, tanggal_acuan: date, selecte
 
 
 def build_mc_person_table(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    """Rincian kontribusi per orang di tim Marketing Corporate, dipecah per Service /
-    Gadget & Aksesoris / Total, diurutkan dari kontribusi terbesar, plus baris TOTAL."""
     if df is None or df.empty or "KelompokPenjual" not in df.columns:
         return pd.DataFrame()
     d = _mc_filter_bulan_berjalan(df, tanggal_acuan, selected_branches)
@@ -2284,6 +2197,37 @@ def build_mc_person_table(df: pd.DataFrame, tanggal_acuan: date, selected_branch
 
     total_row = {
         "Penjual": "TOTAL", "Service": pivot["Service"].sum(),
+        "Gadget & Aksesoris": pivot["Gadget & Aksesoris"].sum(), "Total": pivot["Total"].sum(),
+    }
+    return pd.concat([pivot, pd.DataFrame([total_row])], ignore_index=True)
+
+
+def build_retail_by_branch(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    """Kontribusi Sales Retail (selisih dari Marketing Corporate) per cabang, dipecah
+    Service & Gadget & Aksesoris, supaya kelihatan cabang mana yang tim retail-nya paling
+    kuat dari segi servis maupun penjualan."""
+    if df is None or df.empty or "KelompokPenjual" not in df.columns:
+        return pd.DataFrame()
+    d = _mc_filter_bulan_berjalan(df, tanggal_acuan, selected_branches)
+    d = d[d["KelompokPenjual"] == _RETAIL_LABEL]
+    if d.empty:
+        return pd.DataFrame()
+
+    pivot = d.pivot_table(index="Cabang", columns="Kelompok", values="Omset", aggfunc="sum", fill_value=0.0)
+    for kat in ["Service", "Gadget & Aksesoris"]:
+        if kat not in pivot.columns:
+            pivot[kat] = 0.0
+    pivot = pivot[["Service", "Gadget & Aksesoris"]]
+    pivot["Total"] = pivot["Service"] + pivot["Gadget & Aksesoris"]
+    pivot = pivot.reset_index()
+
+    branches_present = order_branches(pivot["Cabang"].tolist())
+    pivot["Cabang"] = pd.Categorical(pivot["Cabang"], categories=branches_present, ordered=True)
+    pivot = pivot.sort_values("Cabang").reset_index(drop=True)
+    pivot["Cabang"] = pivot["Cabang"].astype(str)
+
+    total_row = {
+        "Cabang": "TOTAL", "Service": pivot["Service"].sum(),
         "Gadget & Aksesoris": pivot["Gadget & Aksesoris"].sum(), "Total": pivot["Total"].sum(),
     }
     return pd.concat([pivot, pd.DataFrame([total_row])], ignore_index=True)
@@ -2350,6 +2294,94 @@ def render_mc_person_table_html(mc_person: pd.DataFrame) -> str:
         f'<table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
         f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}</tbody></table></div>"
     )
+
+
+def render_retail_by_branch_table_html(retail_by_branch: pd.DataFrame) -> str:
+    """Tabel kontribusi Sales Retail per cabang, dipecah Service & Gadget & Aksesoris,
+    dengan warna per kolom (hijau kalau di atas rata-rata semua cabang untuk kolom itu,
+    merah kalau di bawahnya) supaya langsung kelihatan cabang mana yang retail-nya kuat
+    dari segi service maupun penjualan."""
+    if retail_by_branch.empty:
+        return "<p>Tidak ada data untuk periode ini.</p>"
+    branch_rows = retail_by_branch[retail_by_branch["Cabang"] != "TOTAL"]
+    avg_service = branch_rows["Service"].mean() if not branch_rows.empty else 0.0
+    avg_gadget = branch_rows["Gadget & Aksesoris"].mean() if not branch_rows.empty else 0.0
+
+    header_html = (
+        '<th style="padding:8px 10px;text-align:left;background:#b45309;color:white;font-size:12px;border:1px solid #b45309;">CABANG</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#b45309;color:white;font-size:12px;border:1px solid #b45309;">RETAIL SERVICE</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#b45309;color:white;font-size:12px;border:1px solid #b45309;">RETAIL GADGET & AKSESORIS</th>'
+        '<th style="padding:8px 10px;text-align:right;background:#b45309;color:white;font-size:12px;border:1px solid #b45309;">RETAIL TOTAL</th>'
+    )
+
+    def _cell(val, avg, is_total, row_bg, fw):
+        if is_total:
+            return f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{row_bg};font-weight:{fw};">{format_rupiah(val)}</td>'
+        above = val >= avg
+        bg = "#dcfce7" if above else "#fee2e2"
+        fg = "#166534" if above else "#991b1b"
+        badge = "🟢" if above else "🔴"
+        return f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{bg};color:{fg};font-weight:600;">{badge} {format_rupiah(val)}</td>'
+
+    rows_html = ""
+    for i, r in retail_by_branch.iterrows():
+        is_total = r["Cabang"] == "TOTAL"
+        row_bg = "#fff7ed" if is_total else ("#fafafa" if i % 2 else "#ffffff")
+        fw = "700" if is_total else "400"
+        rows_html += (
+            '<tr>'
+            f'<td style="padding:7px 10px;border:1px solid #e5e7eb;background:{row_bg};font-weight:{fw};">{r["Cabang"]}</td>'
+            f'{_cell(r["Service"], avg_service, is_total, row_bg, fw)}'
+            f'{_cell(r["Gadget & Aksesoris"], avg_gadget, is_total, row_bg, fw)}'
+            f'<td style="padding:7px 10px;text-align:right;border:1px solid #e5e7eb;background:{row_bg};font-weight:{fw};">{format_rupiah(r["Total"])}</td>'
+            '</tr>'
+        )
+    return (
+        '<div style="overflow-x:auto;max-height:460px;overflow-y:auto;border:2px solid #b45309;border-radius:10px;">'
+        f'<table style="border-collapse:collapse;width:100%;font-size:12.5px;">'
+        f"<thead><tr>{header_html}</tr></thead><tbody>{rows_html}</tbody></table></div>"
+    )
+
+
+def generate_retail_branch_insights(retail_by_branch: pd.DataFrame) -> list:
+    """Insight ranking cabang untuk kontribusi Sales Retail: menyoroti cabang dengan
+    performa terbaik (untuk dicontoh) dan cabang yang jauh di bawah rata-rata (perlu
+    dorongan program penjualan/servis retail), terpisah untuk Service & Gadget & Aksesoris."""
+    insights = []
+    if retail_by_branch.empty:
+        return insights
+    branch_rows = retail_by_branch[retail_by_branch["Cabang"] != "TOTAL"]
+    if branch_rows.empty:
+        return insights
+
+    for kat_col, kat_label, plan_key in [
+        ("Service", "Retail Service", "Omset Service"),
+        ("Gadget & Aksesoris", "Retail Penjualan Gadget & Aksesoris", "Penjualan Gadget & Aksesoris"),
+    ]:
+        avg = branch_rows[kat_col].mean()
+        if not avg:
+            continue
+        top = branch_rows.sort_values(kat_col, ascending=False).iloc[0]
+        if top[kat_col] > 0:
+            insights.append({
+                "level": "good", "category": "Sales Retail", "title": f"{top['Cabang']} — {kat_label}",
+                "problem": f"Kontribusi Sales Retail tertinggi untuk {kat_label.lower()} bulan ini, dengan "
+                           f"{format_rupiah(top[kat_col])} (rata-rata semua cabang: {format_rupiah(avg)}). "
+                           f"Bisa dijadikan contoh praktik terbaik untuk cabang lain.",
+                "online": [], "offline": [],
+            })
+        plan = _CATEGORY_ACTION_PLANS.get(plan_key, {"online": [], "offline": []})
+        laggards = branch_rows[branch_rows[kat_col] < avg * 0.6].sort_values(kat_col)
+        for _, r in laggards.iterrows():
+            insights.append({
+                "level": "bad" if r[kat_col] < avg * 0.4 else "warn",
+                "category": "Sales Retail", "title": f"{r['Cabang']} — {kat_label}",
+                "problem": f"Kontribusi Sales Retail untuk {kat_label.lower()} baru {format_rupiah(r[kat_col])}, "
+                           f"jauh di bawah rata-rata semua cabang ({format_rupiah(avg)}). Perlu dorongan program "
+                           f"penjualan/servis retail di cabang ini.",
+                "online": plan["online"], "offline": plan["offline"],
+            })
+    return insights
 
 
 _MC_MARKETING_ACTION_PLAN = {
@@ -2716,9 +2748,6 @@ if "_gh_synced_v1" not in st.session_state:
 if "_gh_warnings" not in st.session_state:
     st.session_state["_gh_warnings"] = set()
 
-# Auto-dedupe dijalankan setiap kali app start/reload (bukan cuma saat upload baru) -
-# supaya duplikat lama yang mungkin sudah menumpuk (dari sebelum proteksi upload-time ada,
-# atau ke-restore ulang dari GitHub saat restart) otomatis dibersihkan.
 if "_main_deduped_v1" not in st.session_state:
     _deduped_files = _dedupe_main_files(MAIN_DATA_DIR)
     st.session_state["_main_deduped_v1"] = True
@@ -2732,7 +2761,7 @@ with logo_col:
         st.image(io.BytesIO(base64.b64decode(LOGO_BASE64)), width=90)
 with title_col:
     st.markdown("## Dashboard Omset MFlash")
-    st.caption("Monitoring Omset, Iklan, Walk-in & 6 Pilar — 18 Cabang")
+    st.caption("Monitoring Omset, Iklan, Walk-in, 6 Pilar & Kontribusi MC — 18 Cabang")
 
 if _deduped_files:
     st.info(
@@ -2944,9 +2973,9 @@ df_corp = corp_scoreboard_df if not corp_scoreboard_df.empty else df_corp_manual
 
 if df_main.empty:
     st.info(
-        "ℹ️ Data Omset belum diupload — tab **Ringkasan**, **Scoreboard**, & **6 Pilar** akan "
-        "kosong sampai file Omset diupload di sidebar. Tab **Iklan** & **Walk-in** tetap bisa "
-        "dipakai kalau datanya sudah diupload."
+        "ℹ️ Data Omset belum diupload — tab **Ringkasan**, **Scoreboard**, **6 Pilar**, & "
+        "**Kontribusi MC** akan kosong sampai file Omset diupload di sidebar. Tab **Iklan** & "
+        "**Walk-in** tetap bisa dipakai kalau datanya sudah diupload."
     )
 
 # ---------------------------- Ledger permanen ----------------------------
@@ -3330,16 +3359,14 @@ with tab6:
             st.markdown(render_mc_person_table_html(mc_person), unsafe_allow_html=True)
 
             if not mc_person.empty:
-                dl1, dl2 = st.columns(2)
                 mc_person_no_total = mc_person[mc_person["Penjual"] != "TOTAL"]
                 if not mc_person_no_total.empty:
-                    with dl1:
-                        fig_mc_bar = px.bar(
-                            mc_person_no_total, x="Penjual", y="Total", text_auto=".2s",
-                            color_discrete_sequence=["#1d4ed8"],
-                        )
-                        fig_mc_bar.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10))
-                        st.plotly_chart(fig_mc_bar, use_container_width=True, key="mc_person_bar")
+                    fig_mc_bar = px.bar(
+                        mc_person_no_total, x="Penjual", y="Total", text_auto=".2s",
+                        color_discrete_sequence=["#1d4ed8"],
+                    )
+                    fig_mc_bar.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10))
+                    st.plotly_chart(fig_mc_bar, use_container_width=True, key="mc_person_bar")
 
             st.markdown("---")
             st.markdown("#### 📋 Insight & Rekomendasi Marketing Corporate")
@@ -3349,6 +3376,41 @@ with tab6:
             else:
                 for item in mc_insights:
                     st.markdown(render_structured_insight_card(item), unsafe_allow_html=True)
+
+            st.markdown("---")
+            st.markdown("### 🏬 Kontribusi Sales Retail per Cabang")
+            st.caption(
+                "Omset yang BUKAN atas nama tim Marketing Corporate, dipecah per cabang & kategori "
+                "(Service / Gadget & Aksesoris), supaya kelihatan cabang mana yang tim retail-nya "
+                "paling kuat — dan mana yang masih perlu dorongan program penjualan/servis."
+            )
+            retail_by_branch = build_retail_by_branch(df_main_f, tanggal_acuan, selected_branches)
+            if retail_by_branch.empty:
+                st.info("Belum ada kontribusi Sales Retail untuk periode ini.")
+            else:
+                st.markdown(render_retail_by_branch_table_html(retail_by_branch), unsafe_allow_html=True)
+                st.caption("🟢 Di atas rata-rata semua cabang untuk kategori itu · 🔴 Di bawah rata-rata")
+
+                st.markdown("<br>", unsafe_allow_html=True)
+                retail_chart_df = retail_by_branch[retail_by_branch["Cabang"] != "TOTAL"]
+                if not retail_chart_df.empty:
+                    fig_retail_stack = go.Figure()
+                    fig_retail_stack.add_trace(go.Bar(name="Service", x=retail_chart_df["Cabang"], y=retail_chart_df["Service"], marker_color="#0f766e"))
+                    fig_retail_stack.add_trace(go.Bar(name="Gadget & Aksesoris", x=retail_chart_df["Cabang"], y=retail_chart_df["Gadget & Aksesoris"], marker_color="#6d28d9"))
+                    fig_retail_stack.update_layout(
+                        barmode="stack", height=360, margin=dict(l=10, r=10, t=20, b=10),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    )
+                    st.plotly_chart(fig_retail_stack, use_container_width=True, key="retail_stacked_by_branch")
+
+                st.markdown("---")
+                st.markdown("#### 📋 Insight Performa Sales Retail per Cabang")
+                retail_insights = generate_retail_branch_insights(retail_by_branch)
+                if not retail_insights:
+                    st.success("Belum ada catatan khusus untuk performa Sales Retail per cabang periode ini.")
+                else:
+                    for item in retail_insights:
+                        st.markdown(render_structured_insight_card(item), unsafe_allow_html=True)
 
 # ==================================== EXPORT LAPORAN ====================================
 st.markdown("---")
