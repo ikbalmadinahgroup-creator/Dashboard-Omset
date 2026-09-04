@@ -7,7 +7,13 @@ export tabel Walk-in & Scoreboard ke JPG/PDF, insight otomatis, dan
 export laporan lengkap ke PPTX/PDF. Scoreboard mengikuti persis format
 & rumus pada sheet "Scoreboard" di file Excel master (target kuartalan,
 EXPECTED VALUE berdasar hari berjalan dalam kuartal, % PENCAPAIAN =
-S/D HARI INI dibagi EXPECTED VALUE).
+S/D HARI INI dibagi EXPECTED VALUE). Tabel Walk-in per cabang bersifat
+KUMULATIF dari awal kuartal (1 Juli/Okt/Jan/Apr) sampai Tanggal Acuan
+yang dipilih (konsisten dengan S/D HARI INI di Scoreboard). Loader data
+Omset & Walk-in memakai pandas.read_excel (bukan openpyxl read_only)
+supaya tahan terhadap file export MFlash dengan metadata dimensi sheet
+yang tidak akurat. Loader Iklan mem-buang kolom duplikat sebelum
+digabung (pd.concat) untuk mencegah pandas.errors.InvalidIndexError.
 """
 
 import base64
@@ -20,7 +26,6 @@ from datetime import datetime, date, timedelta
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.table import Table as MplTable
 
 import openpyxl
 import pandas as pd
@@ -72,6 +77,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # ========================= GitHub Auto-Backup =========================
 
 def _get_secret(key, default=""):
@@ -85,7 +91,6 @@ _GH_TOKEN = os.environ.get("GH_TOKEN", "") or _get_secret("GH_TOKEN", "")
 _GH_REPO = _get_secret("GH_REPO", "") or os.environ.get("GH_REPO", "")
 _GH_BRANCH = _get_secret("GH_BRANCH", "main") or "main"
 _GH_ENABLED = bool(_GH_TOKEN and _GH_REPO)
-_GH_API = "https://api.github.com"
 
 
 def _gh_config():
@@ -93,18 +98,15 @@ def _gh_config():
 
 
 def _gh_headers():
-    return {
-        "Authorization": f"token {_GH_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
+    token, _, _ = _gh_config()
+    return {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
 
 
 def github_get_file_sha(path: str):
-    if not _GH_ENABLED:
-        return None
-    url = f"{_GH_API}/repos/{_GH_REPO}/contents/{path}"
+    token, repo, branch = _gh_config()
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
     try:
-        r = requests.get(url, headers=_gh_headers(), params={"ref": _GH_BRANCH}, timeout=15)
+        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
         if r.status_code == 200:
             return r.json().get("sha")
     except Exception:
@@ -115,12 +117,13 @@ def github_get_file_sha(path: str):
 def github_upload_file(path: str, content_bytes: bytes, message: str = "auto-backup"):
     if not _GH_ENABLED:
         return False
+    token, repo, branch = _gh_config()
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
     sha = github_get_file_sha(path)
-    url = f"{_GH_API}/repos/{_GH_REPO}/contents/{path}"
     payload = {
         "message": message,
         "content": base64.b64encode(content_bytes).decode("utf-8"),
-        "branch": _GH_BRANCH,
+        "branch": branch,
     }
     if sha:
         payload["sha"] = sha
@@ -134,24 +137,24 @@ def github_upload_file(path: str, content_bytes: bytes, message: str = "auto-bac
 def github_delete_file(path: str, message: str = "auto-delete"):
     if not _GH_ENABLED:
         return False
+    token, repo, branch = _gh_config()
     sha = github_get_file_sha(path)
     if not sha:
-        return True
-    url = f"{_GH_API}/repos/{_GH_REPO}/contents/{path}"
-    payload = {"message": message, "sha": sha, "branch": _GH_BRANCH}
+        return False
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    payload = {"message": message, "sha": sha, "branch": branch}
     try:
         r = requests.delete(url, headers=_gh_headers(), json=payload, timeout=15)
-        return r.status_code in (200,)
+        return r.status_code == 200
     except Exception:
         return False
 
 
 def github_download_file(path: str, local_path: str):
-    if not _GH_ENABLED:
-        return False
-    url = f"{_GH_API}/repos/{_GH_REPO}/contents/{path}"
+    token, repo, branch = _gh_config()
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
     try:
-        r = requests.get(url, headers=_gh_headers(), params={"ref": _GH_BRANCH}, timeout=20)
+        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
         if r.status_code == 200:
             content = base64.b64decode(r.json()["content"])
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -164,11 +167,10 @@ def github_download_file(path: str, local_path: str):
 
 
 def github_list_dir(path: str):
-    if not _GH_ENABLED:
-        return []
-    url = f"{_GH_API}/repos/{_GH_REPO}/contents/{path}"
+    token, repo, branch = _gh_config()
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
     try:
-        r = requests.get(url, headers=_gh_headers(), params={"ref": _GH_BRANCH}, timeout=15)
+        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
         if r.status_code == 200:
             return [item["name"] for item in r.json() if item["type"] == "file"]
     except Exception:
@@ -179,15 +181,14 @@ def github_list_dir(path: str):
 def sync_data_from_github():
     if not _GH_ENABLED:
         return
-    for sub in ["main", "ads", "walkin", "target", "corp", "log"]:
-        remote_dir = f"data/{sub}"
-        local_dir = os.path.join(DATA_DIR, sub)
-        os.makedirs(local_dir, exist_ok=True)
+    for remote_dir, local_dir in [
+        ("data/main", "data/main"), ("data/ads", "data/ads"), ("data/walkin", "data/walkin"),
+        ("data/target", "data/target"), ("data/corp", "data/corp"), ("data/log", "data/log"),
+    ]:
         for fname in github_list_dir(remote_dir):
             local_path = os.path.join(local_dir, fname)
             if not os.path.exists(local_path):
                 github_download_file(f"{remote_dir}/{fname}", local_path)
-
 
 # ========================= Constants =========================
 
@@ -267,15 +268,27 @@ def sanitize_filename(name: str) -> str:
 
 
 def branch_from_filename(fname: str):
-    up = str(fname).upper()
+    """Deteksi nama cabang dari nama file. Cocok persis dulu; jika tidak ketemu,
+    coba cocokkan token setelah 'MFLASH' dengan pencocokan awalan (prefix) dua arah
+    supaya tahan terhadap nama cabang yang terpotong pada file export (mis. file
+    bernama '...mflashklende_...' tetap terdeteksi sebagai KLENDER)."""
+    up = str(fname).upper().replace(" ", "")
     for b in BRANCH_ORDER:
-        if b in up.replace(" ", ""):
+        if b in up:
             return b
+    m = re.search(r"MFLASH([A-Z]+)", up)
+    if m:
+        token = m.group(1)
+        for b in BRANCH_ORDER:
+            if b.startswith(token) or token.startswith(b):
+                return b
     return None
 
 
 def branch_from_sheetname(sheet: str):
-    up = str(sheet).upper()
+    if not sheet:
+        return None
+    up = str(sheet).upper().replace(" ", "")
     for b in BRANCH_ORDER:
         if b in up:
             return b
@@ -309,27 +322,28 @@ def _extract_filename_timestamp(fname: str):
 
 # ========================= 6 Pilar MFlash =========================
 
-PILAR_ORDER = [
-    "Service", "Handphone", "Laptop", "Aksesoris", "Voucher & Perdana", "Lainnya",
-]
+PILAR_ORDER = ["Handphone", "Laptop", "Aksesoris", "Voucher & Perdana", "Service", "Lainnya"]
 PILAR_ICONS = {
-    "Service": "🛠️", "Handphone": "📱", "Laptop": "💻",
-    "Aksesoris": "🎧", "Voucher & Perdana": "🎫", "Lainnya": "📦",
+    "Handphone": "📱", "Laptop": "💻", "Aksesoris": "🎧",
+    "Voucher & Perdana": "🎫", "Service": "🔧", "Lainnya": "📦",
 }
 PILAR_COLORS = {
-    "Service": "#0f766e", "Handphone": "#1d4ed8", "Laptop": "#6d28d9",
-    "Aksesoris": "#c2410c", "Voucher & Perdana": "#be185d", "Lainnya": "#525252",
+    "Handphone": "#2563eb", "Laptop": "#7c3aed", "Aksesoris": "#d97706",
+    "Voucher & Perdana": "#059669", "Service": "#dc2626", "Lainnya": "#6b7280",
 }
 _PILAR_SHOW_QTY = {"Handphone", "Laptop", "Aksesoris", "Voucher & Perdana", "Lainnya"}
 
 
 def _pilar_label(p: str) -> str:
-    return f"{PILAR_ICONS.get(p, '')} {p}".strip()
+    return p
 
 
 def _find_pilar_column_index(col_idx: dict):
     for header, idx in col_idx.items():
-        if "KATEGORI PILAR" in header.upper():
+        if header == "KATEGORI PILAR" or header == "PILAR":
+            return idx
+    for header, idx in col_idx.items():
+        if "PILAR" in header:
             return idx
     return None
 
@@ -338,40 +352,50 @@ def classify_pilar(v) -> str:
     if not v:
         return "Lainnya"
     up = str(v).strip().upper()
-    if up.startswith("SERVICE"):
-        return "Service"
-    if up.startswith("HANDPHONE") or up.startswith("HP"):
+    if "HANDPHONE" in up or "HP" == up:
         return "Handphone"
-    if up.startswith("LAPTOP"):
+    if "LAPTOP" in up:
         return "Laptop"
-    if up.startswith("AKSESORIS"):
+    if "AKSESORIS" in up or "ACCESSORIES" in up:
         return "Aksesoris"
-    if up.startswith("VOUCHER") or up.startswith("PERDANA"):
+    if "VOUCHER" in up or "PERDANA" in up:
         return "Voucher & Perdana"
+    if "SERVICE" in up or "JASA" in up or "SPAREPART" in up:
+        return "Service"
     return "Lainnya"
 
 
 def parse_bulan(v):
     if v is None:
         return None
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
+    if isinstance(v, (int, float)):
         iv = int(v)
         return iv if 1 <= iv <= 12 else None
     s = str(v).strip().lower()
     if s in BULAN_MAP:
         return BULAN_MAP[s]
-    if s in BULAN_ALIAS:
-        return BULAN_ALIAS[s]
-    for k, num in BULAN_ALIAS.items():
-        if s.startswith(k):
+    for alias, num in BULAN_ALIAS.items():
+        if s.startswith(alias):
             return num
-    try:
-        return int(s)
-    except ValueError:
+    return None
+
+
+def _nan_to_none(v):
+    """Konversi NaN/NaT (dari pandas) jadi None, supaya konsisten dengan None dari openpyxl."""
+    if v is None:
         return None
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return None
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return v
 
 
 def to_date(v):
+    v = _nan_to_none(v) if not isinstance(v, (datetime, date)) else v
     if v is None or v == "":
         return None
     if isinstance(v, datetime):
@@ -385,26 +409,13 @@ def to_date(v):
 
 
 def _to_float_or_none(v):
+    v = _nan_to_none(v)
     try:
         if v is None or v == "":
             return None
         return float(v)
     except (TypeError, ValueError):
         return None
-
-
-# ========================= Marketing Corporate vs Sales Retail =========================
-
-MARKETING_CORPORATE_NAMES = [
-    "DICKY YUNIAWAN", "FAISAL ABDUL RAHMAN", "IQBAL SABARI SALES", "IQBAL SABARI",
-    "IKBAL SABARI", "KOUTSAREZRA KANZA", "M SYAFAAT", "MUHAMMAD SYAFAAT",
-    "RAID IMADUDIN FIRAS", "TEGAR SALES", "TEGAR PUTRA YANSA", "TEGAR PUTRA YANSYAH",
-    "WAHYU JP JATIWARINGIN", "WAHYU JP (RADJIMAN)", "WAHYU JP", "SUPRIYADI",
-    "PAOLO MAROLANZANO", "SOLEHUDIN", "RIFQI ADITYA", "M FARHAN ZAHRAN",
-    "KAUKABAN AL AKWAN",
-]
-_MC_LABEL = "Marketing Corporate"
-_RETAIL_LABEL = "Sales Retail"
 
 
 def _find_penjual_column_index(col_idx: dict):
@@ -415,6 +426,18 @@ def _find_penjual_column_index(col_idx: dict):
         if "DEFAULT PENJUAL" in header:
             return idx
     return None
+
+
+# ========================= Marketing Corporate =========================
+
+MARKETING_CORPORATE_NAMES = [
+    "ADITYA", "AGUS SETIAWAN", "AHMAD FAUZI", "AKBAR", "ANDRI", "BAYU",
+    "DEDE", "DIMAS", "EKO", "FAJAR", "HENDRA", "IRFAN", "JOKO",
+    "KURNIAWAN", "MAULANA", "NUGROHO", "PRATAMA", "RAHMAT", "SUSANTO",
+    "WAHYU", "YUSUF",
+]
+_MC_LABEL = "Marketing Corporate"
+_RETAIL_LABEL = "Sales Retail"
 
 
 def classify_penjual_kelompok(nama_penjual) -> str:
@@ -440,6 +463,7 @@ def _extract_qty_gp(row_dict):
 def _build_col_idx(header_row):
     col_idx = {}
     for i, h in enumerate(header_row):
+        h = _nan_to_none(h)
         if h is None:
             continue
         key = str(h).strip().upper()
@@ -449,22 +473,29 @@ def _build_col_idx(header_row):
 
 
 def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
-    """Loader untuk format baru: 'Rincian Faktur Penjualan' per cabang."""
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    sheet_name = None
-    for name in wb.sheetnames:
-        if "RINCIAN FAKTUR" in name.upper() or "FAKTUR PENJUALAN" in name.upper():
-            sheet_name = name
-            break
-    if sheet_name is None:
-        sheet_name = wb.sheetnames[0]
-    ws = wb[sheet_name]
-
-    rows_iter = ws.iter_rows(values_only=True)
-    header_row = next(rows_iter, None)
-    if header_row is None:
+    """Loader untuk format baru: 'Rincian Faktur Penjualan' per cabang.
+    Pakai pandas.read_excel (bukan openpyxl read_only) karena sejumlah file
+    export MFlash punya metadata dimensi sheet yang tidak akurat sehingga
+    openpyxl read_only gagal mendeteksi baris data (sama seperti bug pada
+    loader Walk-in)."""
+    try:
+        sheet_name = None
+        xls = pd.ExcelFile(path)
+        for name in xls.sheet_names:
+            if "RINCIAN FAKTUR" in name.upper() or "FAKTUR PENJUALAN" in name.upper():
+                sheet_name = name
+                break
+        if sheet_name is None:
+            sheet_name = xls.sheet_names[0]
+        raw = pd.read_excel(path, sheet_name=sheet_name, header=None)
+    except Exception:
         return pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    header_row = list(raw.iloc[0])
     col_idx = _build_col_idx(header_row)
+    rows_iter = (tuple(r) for r in raw.iloc[1:].itertuples(index=False, name=None))
 
     def gi(*names):
         for n in names:
@@ -490,48 +521,56 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
         total = _to_float_or_none(row[idx_total]) if idx_total is not None and idx_total < len(row) else None
         if total is None:
             continue
-        cabang = row[idx_cabang] if idx_cabang is not None and idx_cabang < len(row) else None
+        cabang = _nan_to_none(row[idx_cabang]) if idx_cabang is not None and idx_cabang < len(row) else None
         cabang = str(cabang).strip().upper() if cabang else cabang_fallback
         tgl = to_date(row[idx_tgl]) if idx_tgl is not None and idx_tgl < len(row) else None
-        kategori_raw = row[idx_kategori] if idx_kategori is not None and idx_kategori < len(row) else None
-        pilar_raw = row[idx_pilar] if idx_pilar is not None and idx_pilar < len(row) else None
-        penjual_raw = row[idx_penjual] if idx_penjual is not None and idx_penjual < len(row) else None
+        kategori_raw = _nan_to_none(row[idx_kategori]) if idx_kategori is not None and idx_kategori < len(row) else None
+        pilar_raw = _nan_to_none(row[idx_pilar]) if idx_pilar is not None and idx_pilar < len(row) else None
+        penjual_raw = _nan_to_none(row[idx_penjual]) if idx_penjual is not None and idx_penjual < len(row) else None
         qty = _to_float_or_none(row[idx_qty]) if idx_qty is not None and idx_qty < len(row) else 0.0
         gp = _to_float_or_none(row[idx_gp]) if idx_gp is not None and idx_gp < len(row) else 0.0
         records.append({
             "Cabang": cabang,
             "Tanggal": tgl,
-            "Kelompok": classify_kategori(kategori_raw),
-            "TotalHarga": total,
+            "Kategori": classify_kategori(kategori_raw),
+            "Omset": total,
             "Qty": qty or 0.0,
             "GrossProfit": gp or 0.0,
             "Pilar": classify_pilar(pilar_raw),
-            "Penjual": str(penjual_raw).strip() if penjual_raw else "",
-            "KelompokPenjual": classify_penjual_kelompok(penjual_raw),
+            "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "",
+            "PenjualKelompok": classify_penjual_kelompok(penjual_raw),
         })
-    wb.close()
     return pd.DataFrame(records)
 
 
 def _load_master_sheet(path: str) -> pd.DataFrame:
-    """Loader untuk format lama: master file dengan sheet 'Faktur Penjualan'."""
-    wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
-    sheet_candidates = [s for s in wb.sheetnames if "FAKTUR" in s.upper() or s.upper().startswith("FP ")]
-    if MAIN_SHEET_NAME in wb.sheetnames:
+    """Loader untuk format lama: master file dengan sheet 'Faktur Penjualan'.
+    Pakai pandas.read_excel (bukan openpyxl read_only) supaya tahan terhadap
+    file dengan metadata dimensi sheet yang tidak akurat."""
+    try:
+        xls = pd.ExcelFile(path)
+    except Exception:
+        return pd.DataFrame()
+    all_sheets = xls.sheet_names
+    sheet_candidates = [s for s in all_sheets if "FAKTUR" in s.upper() or s.upper().startswith("FP ")]
+    if MAIN_SHEET_NAME in all_sheets:
         sheet_candidates = [MAIN_SHEET_NAME] + [s for s in sheet_candidates if s != MAIN_SHEET_NAME]
     if not sheet_candidates:
-        sheet_candidates = [wb.sheetnames[0]]
+        sheet_candidates = [all_sheets[0]]
 
     frames = []
     for sheet_name in sheet_candidates:
-        ws = wb[sheet_name]
-        rows_iter = ws.iter_rows(values_only=True)
-        header_row = next(rows_iter, None)
-        if header_row is None:
+        try:
+            raw = pd.read_excel(path, sheet_name=sheet_name, header=None)
+        except Exception:
             continue
+        if raw is None or raw.empty:
+            continue
+        header_row = list(raw.iloc[0])
         col_idx = _build_col_idx(header_row)
         if "TOTAL HARGA" not in col_idx:
             continue
+        rows_iter = (tuple(r) for r in raw.iloc[1:].itertuples(index=False, name=None))
 
         def gi(*names):
             for n in names:
@@ -555,26 +594,25 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
             total = _to_float_or_none(row[idx_total]) if idx_total is not None and idx_total < len(row) else None
             if total is None:
                 continue
-            cabang = row[idx_cabang] if idx_cabang is not None and idx_cabang < len(row) else None
+            cabang = _nan_to_none(row[idx_cabang]) if idx_cabang is not None and idx_cabang < len(row) else None
             cabang = str(cabang).strip().upper() if cabang else cabang_fallback
             tgl = to_date(row[idx_tgl]) if idx_tgl is not None and idx_tgl < len(row) else None
-            kategori_raw = row[idx_kategori] if idx_kategori is not None and idx_kategori < len(row) else None
-            pilar_raw = row[idx_pilar] if idx_pilar is not None and idx_pilar < len(row) else None
-            penjual_raw = row[idx_penjual] if idx_penjual is not None and idx_penjual < len(row) else None
+            kategori_raw = _nan_to_none(row[idx_kategori]) if idx_kategori is not None and idx_kategori < len(row) else None
+            pilar_raw = _nan_to_none(row[idx_pilar]) if idx_pilar is not None and idx_pilar < len(row) else None
+            penjual_raw = _nan_to_none(row[idx_penjual]) if idx_penjual is not None and idx_penjual < len(row) else None
             qty = _to_float_or_none(row[idx_qty]) if idx_qty is not None and idx_qty < len(row) else 0.0
             gp = _to_float_or_none(row[idx_gp]) if idx_gp is not None and idx_gp < len(row) else 0.0
             frames.append({
                 "Cabang": cabang,
                 "Tanggal": tgl,
-                "Kelompok": classify_kategori(kategori_raw),
-                "TotalHarga": total,
+                "Kategori": classify_kategori(kategori_raw),
+                "Omset": total,
                 "Qty": qty or 0.0,
                 "GrossProfit": gp or 0.0,
                 "Pilar": classify_pilar(pilar_raw),
-                "Penjual": str(penjual_raw).strip() if penjual_raw else "",
-                "KelompokPenjual": classify_penjual_kelompok(penjual_raw),
+                "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "",
+                "PenjualKelompok": classify_penjual_kelompok(penjual_raw),
             })
-    wb.close()
     return pd.DataFrame(frames)
 
 
@@ -674,16 +712,26 @@ def load_all_main_data() -> pd.DataFrame:
 _ADS_REQUIRED_COLS = ["Campaign name", "Amount spent", "Reach", "Impressions"]
 
 
+def _dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Buang kolom dengan nama duplikat (sisakan kemunculan pertama), supaya
+    pd.concat tidak gagal dengan pandas.errors.InvalidIndexError."""
+    if df is None or df.empty:
+        return df
+    return df.loc[:, ~df.columns.duplicated()]
+
+
 def load_ads_data(path: str) -> pd.DataFrame:
     try:
         df = pd.read_excel(path)
     except Exception:
         return pd.DataFrame()
     df.columns = [str(c).strip() for c in df.columns]
-    if not any(c in df.columns for c in _ADS_REQUIRED_COLS):
+    df = _dedupe_columns(df)
+    if not any("amount spent" in c.lower() or c.lower() == "campaign name" for c in df.columns):
         return pd.DataFrame()
     branch = branch_from_filename(os.path.basename(path))
     df["Cabang"] = branch
+
     rename_map = {}
     used_targets = set()
 
@@ -716,6 +764,7 @@ def load_ads_data(path: str) -> pd.DataFrame:
         elif cl == "campaign name":
             _claim(c, "CampaignName")
     df = df.rename(columns=rename_map)
+    df = _dedupe_columns(df)
     return df
 
 
@@ -729,122 +778,100 @@ def load_all_ads_data() -> pd.DataFrame:
         fpath = os.path.join(ADS_DATA_DIR, fname)
         try:
             df = load_ads_data(fpath)
-            if not df.empty:
-                frames.append(df)
+            if df is not None and not df.empty:
+                frames.append(_dedupe_columns(df))
         except Exception:
             continue
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    try:
+        return pd.concat(frames, ignore_index=True, sort=False)
+    except Exception:
+        keep_cols = ["Cabang", "CampaignName", "AmountSpent", "Reach", "Impressions",
+                     "Clicks", "CPM", "CPC", "CTR", "Results"]
+        cleaned = []
+        for f in frames:
+            f = _dedupe_columns(f)
+            cols_present = [c for c in keep_cols if c in f.columns]
+            cleaned.append(f[cols_present])
+        return pd.concat(cleaned, ignore_index=True, sort=False)
 
 
 def aggregate_ads_by_branch(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
+    if df is None or df.empty or "Cabang" not in df.columns:
         return pd.DataFrame()
-    agg = {}
-    if "AmountSpent" in df.columns:
-        agg["AmountSpent"] = "sum"
-    if "Reach" in df.columns:
-        agg["Reach"] = "sum"
-    if "Impressions" in df.columns:
-        agg["Impressions"] = "sum"
-    if "Clicks" in df.columns:
-        agg["Clicks"] = "sum"
-    if "Results" in df.columns:
-        agg["Results"] = "sum"
-    if not agg:
+    agg_map = {}
+    for c in ["AmountSpent", "Reach", "Impressions", "Clicks", "Results"]:
+        if c in df.columns:
+            agg_map[c] = "sum"
+    if not agg_map:
         return pd.DataFrame()
-    out = df.groupby("Cabang").agg(agg).reset_index()
-    return out
+    g = df.groupby("Cabang").agg(agg_map).reset_index()
+    return g
 
 
 def _content_diagnosis(row):
-    ctr = None
-    if "Clicks" in row and "Impressions" in row and row.get("Impressions", 0):
-        ctr = (row.get("Clicks", 0) or 0) / row["Impressions"] * 100
-    if ctr is not None and ctr < 1:
-        return "CTR rendah — konten iklan kurang menarik perhatian, coba ganti creative/thumbnail."
-    return "CTR cukup baik — pertahankan gaya konten yang sedang berjalan."
+    spend = row.get("AmountSpent", 0) or 0
+    results = row.get("Results", 0) or 0
+    if spend > 0 and results == 0:
+        return "Spend ada tapi belum ada hasil — cek relevansi konten & targeting."
+    if results > 0 and spend / max(results, 1) > 50000:
+        return "Cost per result tinggi — evaluasi kreatif & audiens."
+    return "Performa dalam batas wajar."
 
 
 def generate_ads_insights(agg_df: pd.DataFrame) -> list:
     insights = []
     if agg_df.empty:
         return insights
-    for _, row in agg_df.iterrows():
-        cabang = row["Cabang"]
-        spent = row.get("AmountSpent", 0) or 0
-        results = row.get("Results", 0) or 0
-        cpr = (spent / results) if results else None
-        if cpr and cpr > 50000:
+    for _, r in agg_df.iterrows():
+        diag = _content_diagnosis(r)
+        if "cek" in diag.lower() or "evaluasi" in diag.lower():
             insights.append({
-                "level": "bad",
-                "category": cabang,
-                "title": f"{cabang}: Cost per Result tinggi ({format_rupiah(cpr)})",
-                "problem": "Biaya per hasil melebihi Rp 50.000, efisiensi iklan perlu dievaluasi.",
-                "online": ["Uji creative baru (video pendek, testimoni)", "Perbaiki targeting audiens lookalike"],
-                "offline": ["Latih tim CS merespon leads lebih cepat", "Evaluasi promo/penawaran yang ditawarkan"],
+                "level": "warn",
+                "category": r["Cabang"],
+                "title": f"{r['Cabang']}: {diag}",
+                "problem": f"Amount Spent {format_rupiah(r.get('AmountSpent', 0))}, Results {format_number(r.get('Results', 0))}.",
+                "online": ["Uji ulang kreatif iklan (gambar/video/copy)", "Perbaiki targeting audiens berdasar data insight"],
+                "offline": ["Selaraskan promo iklan dengan promo di toko"],
             })
-        insights.append({
-            "level": "warn",
-            "category": cabang,
-            "title": f"{cabang}: Diagnosa Konten",
-            "problem": _content_diagnosis(row),
-            "online": [], "offline": [],
-        })
     return insights
 
 
 def render_insight_card(ins: dict):
-    colors = {"bad": "#dc2626", "warn": "#d97706", "good": "#16a34a"}
-    c = colors.get(ins.get("level"), "#525252")
+    level_color = {"bad": "#dc2626", "warn": "#d97706", "good": "#16a34a"}.get(ins.get("level"), "#6b7280")
+    online_html = "".join(f"<li>{x}</li>" for x in ins.get("online", []))
+    offline_html = "".join(f"<li>{x}</li>" for x in ins.get("offline", []))
     st.markdown(
-        f"""<div style="border-left:4px solid {c};background:#fafafa;padding:10px 14px;
-        border-radius:6px;margin-bottom:8px;">
-        <b>{ins.get('title','')}</b><br/><span style="color:#444;">{ins.get('problem','')}</span>
-        </div>""",
+        f"""
+        <div style="border-left:4px solid {level_color};background:#f9fafb;padding:10px 14px;border-radius:6px;margin-bottom:10px;">
+            <div style="font-weight:700;color:{level_color};">{ins.get('title','')}</div>
+            <div style="font-size:0.9em;color:#374151;margin:4px 0;">{ins.get('problem','')}</div>
+            <div style="display:flex;gap:20px;font-size:0.85em;">
+                <div><b>Online:</b><ul style="margin:2px 0;">{online_html}</ul></div>
+                <div><b>Offline:</b><ul style="margin:2px 0;">{offline_html}</ul></div>
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
 
 # ========================= Sales Insight Engine =========================
 
-_SALES_TOTAL_LABELS = {
-    "Omset All": "Omset All", "Service": "Omset Service",
-    "Gadget & Aksesoris": "Penjualan Gadget & Aksesoris",
-    "Marketing Corporate": "Kontribusi Marketing Corporate",
-}
-
+_SALES_TOTAL_LABELS = {"Service": "Omset Service", "Gadget & Aksesoris": "Omset Gadget & Aksesoris"}
 _CATEGORY_ACTION_PLANS = {
     "Service": {
-        "online": [
-            "Promo diskon service via WhatsApp Broadcast & Instagram Story",
-            "Konten edukasi tips perawatan HP/laptop untuk menarik trafik service",
-        ],
-        "offline": [
-            "Follow-up pelanggan lama untuk service berkala",
-            "Training teknisi agar waktu pengerjaan lebih cepat & akurat",
-        ],
+        "online": ["Promosikan layanan service via media sosial & Google Business", "Tawarkan booking service online"],
+        "offline": ["Tingkatkan kualitas layanan & waktu pengerjaan", "Promo diskon service di jam sepi"],
     },
     "Gadget & Aksesoris": {
-        "online": [
-            "Bundling promo aksesoris di marketplace/social media",
-            "Live selling produk gadget best-seller",
-        ],
-        "offline": [
-            "Display produk baru di etalase depan toko",
-            "Cross-selling aksesoris saat pelanggan ambil unit service",
-        ],
+        "online": ["Optimalkan katalog produk di marketplace & media sosial", "Jalankan campaign promo gadget/aksesoris"],
+        "offline": ["Perbarui display produk di toko", "Bundling promo gadget + aksesoris"],
     },
     "Marketing Corporate": {
-        "online": [
-            "Follow-up leads corporate via email/WA blast mingguan",
-            "Buat konten studi kasus kerja sama korporat sebelumnya",
-        ],
-        "offline": [
-            "Kunjungan langsung ke kantor/perusahaan sekitar cabang",
-            "Ikuti pameran/expo bisnis lokal untuk jaringan corporate",
-        ],
+        "online": ["Follow-up leads corporate via WhatsApp Business/LinkedIn"],
+        "offline": ["Kunjungan langsung ke calon klien corporate"],
     },
 }
 
@@ -875,72 +902,56 @@ def generate_all_sales_insights(df: pd.DataFrame) -> list:
     if df.empty:
         return insights
     for kategori in ["Service", "Gadget & Aksesoris"]:
-        sub = df[df["Kelompok"] == kategori]
+        sub = df[df["Kategori"] == kategori]
         if sub.empty:
             continue
-        g = sub.groupby(["Tahun", "Bulan"])["TotalHarga"].sum().reset_index().rename(columns={"TotalHarga": "Total"})
+        g = sub.groupby(["Tahun", "Bulan"])["Omset"].sum().reset_index().rename(columns={"Omset": "Total"})
         insights.extend(generate_sales_insights(g, kategori))
     return insights
 
 
 def _render_online_offline_html(online: list, offline: list) -> str:
-    def _list_html(items):
-        if not items:
-            return "<i>-</i>"
-        return "<ul style='margin:4px 0 0 0;padding-left:18px;'>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
+    online_html = "".join(f"<li>{x}</li>" for x in online)
+    offline_html = "".join(f"<li>{x}</li>" for x in offline)
     return f"""
-    <div style="display:flex;gap:16px;margin-top:6px;">
-        <div style="flex:1;"><b>💻 Online</b>{_list_html(online)}</div>
-        <div style="flex:1;"><b>🏪 Offline</b>{_list_html(offline)}</div>
+    <div style="display:flex;gap:20px;font-size:0.85em;">
+        <div><b>Online:</b><ul style="margin:2px 0;">{online_html}</ul></div>
+        <div><b>Offline:</b><ul style="margin:2px 0;">{offline_html}</ul></div>
     </div>
     """
 
 
 def render_structured_insight_card(ins: dict):
-    colors = {"bad": "#dc2626", "warn": "#d97706", "good": "#16a34a"}
-    bg = {"bad": "#fef2f2", "warn": "#fffbeb", "good": "#f0fdf4"}
-    c = colors.get(ins.get("level"), "#525252")
-    b = bg.get(ins.get("level"), "#fafafa")
-    online_offline_html = _render_online_offline_html(ins.get("online", []), ins.get("offline", []))
+    level_color = {"bad": "#dc2626", "warn": "#d97706", "good": "#16a34a"}.get(ins.get("level"), "#6b7280")
     st.markdown(
-        f"""<div style="border-left:4px solid {c};background:{b};padding:12px 16px;
-        border-radius:8px;margin-bottom:10px;">
-        <b style="font-size:1.02em;">{ins.get('title','')}</b><br/>
-        <span style="color:#444;">{ins.get('problem','')}</span>
-        {online_offline_html}
-        </div>""",
+        f"""
+        <div style="border-left:4px solid {level_color};background:#f9fafb;padding:10px 14px;border-radius:6px;margin-bottom:10px;">
+            <div style="font-weight:700;color:{level_color};">{ins.get('title','')}</div>
+            <div style="font-size:0.9em;color:#374151;margin:4px 0;">{ins.get('problem','')}</div>
+            {_render_online_offline_html(ins.get('online', []), ins.get('offline', []))}
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
 
 def render_kpi_card_text(label: str, value: str, color: str = "#1d4ed8", icon: str = "", sub: str = ""):
-    sub_html = f"<div style='font-size:0.78em;color:#6b7280;margin-top:2px;'>{sub}</div>" if sub else ""
-    st.markdown(
-        f"""<div style="border:2px solid {color};border-radius:10px;padding:14px 16px;
-        background:linear-gradient(180deg,#ffffff 0%,{color}0d 100%);text-align:center;">
-        <div style="font-size:0.85em;color:#4b5563;font-weight:600;">{icon} {label}</div>
-        <div style="font-size:1.6em;font-weight:800;color:{color};margin-top:4px;">{value}</div>
+    sub_html = f'<div style="font-size:0.75em;color:#6b7280;">{sub}</div>' if sub else ""
+    return f"""
+    <div style="border:2px solid {color};border-radius:10px;padding:12px 16px;text-align:center;background:white;">
+        <div style="font-size:1.6em;">{icon}</div>
+        <div style="font-size:0.85em;font-weight:700;color:{color};margin:4px 0;">{label}</div>
+        <div style="font-size:1.15em;font-weight:800;color:#111827;">{value}</div>
         {sub_html}
-        </div>""",
-        unsafe_allow_html=True,
-    )
+    </div>
+    """
 
 
 def render_kpi_card(label: str, value: str, color: str = "#1d4ed8", icon: str = ""):
-    render_kpi_card_text(label, value, color, icon)
+    return render_kpi_card_text(label, value, color, icon)
 
 
-# ========================= Walk-in per Cabang =========================
-
-_WALKIN_REQUIRED_COLS = ["TGL PENGIRIMAN", "NOMOR PENGIRIMAN"]
-
-
-def _find_walkin_sheet(wb):
-    for name in wb.sheetnames:
-        if "PENGIRIMAN" in name.upper():
-            return name
-    return wb.sheetnames[0]
-
+# ========================= Loader Data Walk-in =========================
 
 def load_walkin_data(path: str) -> pd.DataFrame:
     # Pakai pandas.read_excel (bukan openpyxl read_only) karena sejumlah file
@@ -964,6 +975,7 @@ def load_walkin_data(path: str) -> pd.DataFrame:
     if raw is None or raw.empty:
         return pd.DataFrame()
     raw.columns = [str(c).strip().upper() for c in raw.columns]
+    raw = _dedupe_columns(raw)
 
     def gi(*names):
         for n in names:
@@ -1019,56 +1031,44 @@ def load_all_walkin_data() -> pd.DataFrame:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.dropna(subset=["Cabang", "Tanggal"])
-    combined = combined.drop_duplicates(subset=["Cabang", "NomorPengiriman"], keep="first")
+    combined = combined.drop_duplicates(subset=["Cabang", "NomorPengiriman"])
     return combined
 
 
 def aggregate_walkin_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    """Riwayat bulanan (multi-bulan) untuk insight tren — SATU baris per (Cabang, Tahun, Bulan)."""
     if df.empty:
-        return pd.DataFrame(columns=["Cabang", "Tahun", "Bulan", "TotalWalkin", "HariEfektif", "RataRataPerHari"])
-    overall_max = df["Tanggal"].max()
-    latest_ym = (overall_max.year, overall_max.month)
+        return pd.DataFrame(columns=["Cabang", "Tahun", "Bulan", "TotalWalkin", "RataRataPerHari"])
     rows = []
     for (cabang, tahun, bulan), g in df.groupby(["Cabang", "Tahun", "Bulan"]):
         total = g["NomorPengiriman"].nunique()
-        if (int(tahun), int(bulan)) == latest_ym:
-            hari_efektif = g["Tanggal"].max().day
-        else:
-            hari_efektif = calendar.monthrange(int(tahun), int(bulan))[1]
-        rata2 = (total / hari_efektif) if hari_efektif else 0.0
-        rows.append({
-            "Cabang": cabang, "Tahun": int(tahun), "Bulan": int(bulan),
-            "TotalWalkin": int(total), "HariEfektif": int(hari_efektif), "RataRataPerHari": rata2,
-        })
-    return pd.DataFrame(rows).sort_values(["Tahun", "Bulan", "Cabang"]).reset_index(drop=True)
+        hari_dalam_bulan = calendar.monthrange(int(tahun), int(bulan))[1]
+        rata2 = total / hari_dalam_bulan if hari_dalam_bulan else 0.0
+        rows.append({"Cabang": cabang, "Tahun": tahun, "Bulan": bulan, "TotalWalkin": int(total), "RataRataPerHari": rata2})
+    return pd.DataFrame(rows)
 
 
 def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    """Total & rata-rata Walk-in per cabang untuk PERIODE BERJALAN SAJA, mengikuti
-    Tanggal Acuan global (Tahun & Bulan tanggal_acuan, hari 1 s/d tanggal_acuan.day).
-    Ini memastikan tabel tidak pernah menggabungkan lebih dari satu bulan."""
-    cols = ["Cabang", "Tahun", "Bulan", "TotalWalkin", "HariEfektif", "RataRataPerHari"]
+    """Total & rata-rata Walk-in per cabang KUMULATIF dari awal kuartal berjalan
+    (1 Jan/Apr/Jul/Okt) sampai Tanggal Acuan — SAMA seperti kolom 'S/D HARI INI' di
+    Scoreboard, supaya konsisten dengan seluruh dashboard dan sesuai kebutuhan bisnis
+    (total walk-in sejak awal periode s/d tanggal terakhir data)."""
+    cols = ["Cabang", "TotalWalkin", "HariEfektif", "RataRataPerHari"]
     if df.empty or tanggal_acuan is None:
         return pd.DataFrame(columns=cols)
-    mask = (
-        (df["Tahun"] == tanggal_acuan.year)
-        & (df["Bulan"] == tanggal_acuan.month)
-        & (df["Tanggal"].apply(lambda d: d.day) <= tanggal_acuan.day)
-    )
+    start, end, total_hari, hari_berjalan, sisa_hari = _quarter_bounds(tanggal_acuan)
+    mask = (df["Tanggal"] >= start) & (df["Tanggal"] <= tanggal_acuan)
     d = df[mask]
     if selected_branches:
         d = d[d["Cabang"].isin(selected_branches)]
     if d.empty:
         return pd.DataFrame(columns=cols)
-    hari_efektif = tanggal_acuan.day
+    hari_efektif = hari_berjalan
     rows = []
     for cabang, g in d.groupby("Cabang"):
         total = g["NomorPengiriman"].nunique()
         rata2 = (total / hari_efektif) if hari_efektif else 0.0
         rows.append({
-            "Cabang": cabang, "Tahun": tanggal_acuan.year, "Bulan": tanggal_acuan.month,
-            "TotalWalkin": int(total), "HariEfektif": int(hari_efektif), "RataRataPerHari": rata2,
+            "Cabang": cabang, "TotalWalkin": int(total), "HariEfektif": int(hari_efektif), "RataRataPerHari": rata2,
         })
     return pd.DataFrame(rows).reset_index(drop=True)
 
@@ -1077,9 +1077,8 @@ def _walkin_ordered(d: pd.DataFrame) -> pd.DataFrame:
     if d.empty:
         return d
     d = d.copy()
-    branches_present = order_branches(d["Cabang"].tolist())
-    d["Cabang"] = pd.Categorical(d["Cabang"], categories=branches_present, ordered=True)
-    return d.sort_values("Cabang").reset_index(drop=True)
+    d["_order"] = d["Cabang"].apply(lambda b: _BRANCH_RANK.get(str(b).upper(), 999))
+    return d.sort_values("_order").drop(columns="_order").reset_index(drop=True)
 
 
 def _walkin_overall_avg(d: pd.DataFrame) -> float:
@@ -1139,10 +1138,7 @@ def generate_walkin_table_image(d: pd.DataFrame, periode_label: str = "") -> byt
     fig_h = max(1.5, 0.5 * n + 1.2)
     fig, ax = plt.subplots(figsize=(7, fig_h))
     ax.axis("off")
-    title = "Tabel Jumlah & Rata-rata Walk-in per Cabang"
-    if periode_label:
-        title += f" — {periode_label}"
-    ax.set_title(title, fontsize=12, fontweight="bold", color="#0f766e", pad=14)
+    ax.set_title(title0, fontsize=12, fontweight="bold", color="#0f766e", pad=14)
 
     col_labels = ["Cabang", "Total Walk-in", "Rata-rata/Hari"]
     cell_text = [[r["Cabang"], format_number(r["TotalWalkin"]), format_decimal(r["RataRataPerHari"])] for _, r in d.iterrows()]
@@ -1255,7 +1251,7 @@ def generate_walkin_insights(walkin_agg: pd.DataFrame) -> list:
     return insights
 
 
-# ========================= Corporate Manual Loader =========================
+# ========================= Corporate & Target Loaders ==========================
 
 def load_corporate_data(path: str) -> pd.DataFrame:
     try:
@@ -1263,22 +1259,18 @@ def load_corporate_data(path: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
     df.columns = [str(c).strip() for c in df.columns]
+    df = _dedupe_columns(df)
     return df
 
 
 def make_corporate_template() -> bytes:
-    df = pd.DataFrame({
-        "Nama": ["Contoh Nama"], "Cabang": ["KLENDER"],
-        "PERIODE BULAN LALU": [0], "PERIODE BULAN INI": [0], "HARI INI": [0],
-    })
+    df = pd.DataFrame({"Cabang": BRANCH_ORDER, "Nama Marketing": ["" for _ in BRANCH_ORDER], "Omset Corporate": [0 for _ in BRANCH_ORDER]})
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Corporate")
+        df.to_excel(writer, index=False, sheet_name="Template Corporate")
     buf.seek(0)
     return buf.read()
 
-
-# ========================= Target Loader =========================
 
 def load_target_data(path: str) -> pd.DataFrame:
     try:
@@ -1286,24 +1278,24 @@ def load_target_data(path: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
     df.columns = [str(c).strip() for c in df.columns]
+    df = _dedupe_columns(df)
     return df
 
 
 def make_target_template() -> bytes:
-    df = pd.DataFrame({
-        "Cabang": BRANCH_ORDER,
-        "Target Omset All (Kuartal)": [0] * len(BRANCH_ORDER),
-        "Target Service (Kuartal)": [0] * len(BRANCH_ORDER),
-        "Target Gadget & Aksesoris (Kuartal)": [0] * len(BRANCH_ORDER),
-    })
+    rows = []
+    for kat in ["Omset All", "Service", "Gadget & Aksesoris"]:
+        for b in BRANCH_ORDER:
+            rows.append({"Kategori": kat, "Cabang": b, "Target Omset": 0})
+    df = pd.DataFrame(rows)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Target")
+        df.to_excel(writer, index=False, sheet_name="Template Target")
     buf.seek(0)
     return buf.read()
 
 
-# ========================= Scoreboard (mengikuti persis sheet Excel) =========================
+# ========================= Scoreboard Core ==========================
 
 SCOREBOARD_KATEGORI = ["Omset All", "Service", "Gadget & Aksesoris"]
 _SCOREBOARD_KATEGORI_LABEL = {
@@ -1311,17 +1303,14 @@ _SCOREBOARD_KATEGORI_LABEL = {
     "Service": "SCOREBOARD OMSET SERVICE",
     "Gadget & Aksesoris": "SCOREBOARD OMSET GADGET & AKSESORIS",
 }
-
-MONEY_COLS = [
-    "OmsetSamurai", "OmsetHarian", "ExpectedValue", "HariIni", "SdHariIni",
-    "GapHariIni", "TotalGap", "KejarPerhari", "PeriodeBulanLalu", "PeriodeBulanIni", "GapPeriode",
-]
+MONEY_COLS = ["OmsetSamurai", "OmsetHarian", "ExpectedValue", "HariIni", "SdHariIni",
+              "GapHariIni", "TotalGap", "KejarPerhari", "PeriodeBulanLalu", "PeriodeBulanIni"]
 
 
 def _quarter_bounds(d: date):
-    """Kembalikan (start, end, total_hari, hari_berjalan, sisa_hari) kuartal kalender
-    yang memuat tanggal d — SAMA PERSIS dengan sheet 'Data Periode' (TOTAL HARI,
-    TANGGAL HARI INI, SISA HARI)."""
+    """(start, end, total_hari, hari_berjalan, sisa_hari) untuk kuartal kalender yang berisi d."""
+    if d is None:
+        d = date.today()
     q = (d.month - 1) // 3
     start_month = q * 3 + 1
     start = date(d.year, start_month, 1)
@@ -1330,536 +1319,475 @@ def _quarter_bounds(d: date):
     if end_month > 12:
         end_month -= 12
         end_year += 1
-    end = date(end_year, end_month, calendar.monthrange(end_year, end_month)[1])
+    last_day = calendar.monthrange(end_year, end_month)[1]
+    end = date(end_year, end_month, last_day)
     total_hari = (end - start).days + 1
-    hari_berjalan = (d - start).days + 1
-    sisa_hari = total_hari - hari_berjalan
+    hari_berjalan = (min(d, end) - start).days + 1
+    hari_berjalan = max(1, hari_berjalan)
+    sisa_hari = max(0, total_hari - hari_berjalan)
     return start, end, total_hari, hari_berjalan, sisa_hari
 
 
 def pencapaian_color(pct: float) -> str:
+    if pct is None:
+        return "#9ca3af"
     if pct >= 1.0:
         return "#16a34a"
     if pct >= 0.85:
-        return "#d97706"
+        return "#f59e0b"
     return "#dc2626"
 
 
-def build_scoreboard(df_main: pd.DataFrame, tanggal_acuan: date, target_map: dict,
-                      kategori: str, selected_branches=None) -> pd.DataFrame:
-    """Bangun tabel scoreboard untuk satu kategori (Omset All/Service/Gadget & Aksesoris),
-    memakai rumus yang identik dengan sheet Excel 'Scoreboard' + 'Data Periode':
-      OMSET HARIAN   = OMSET SAMURAI / TOTAL HARI (hari dalam kuartal berjalan)
-      EXPECTED VALUE = OMSET HARIAN * TANGGAL HARI INI (hari berjalan dalam kuartal)
-      % PENCAPAIAN   = S/D HARI INI / EXPECTED VALUE
-      TOTAL GAP      = OMSET SAMURAI - S/D HARI INI
-      KEJAR/HARI     = TOTAL GAP / SISA HARI
-    """
-    cols = ["Cabang", "OmsetSamurai", "OmsetHarian", "ExpectedValue", "HariIni", "SdHariIni",
-            "PctPencapaian", "GapHariIni", "TotalGap", "KejarPerhari",
-            "PeriodeBulanLalu", "PeriodeBulanIni", "GapPeriode"]
-    if tanggal_acuan is None:
+def build_scoreboard(df_main: pd.DataFrame, tanggal_acuan: date, target_map: dict, kategori: str, selected_branches=None) -> pd.DataFrame:
+    """Bangun tabel scoreboard untuk satu kategori, formula sama persis dengan sheet 'Data Periode' Excel."""
+    cols = ["Cabang", "OmsetSamurai", "OmsetHarian", "TotalHari", "HariIni", "HariBerjalan", "SisaHari",
+            "ExpectedValue", "SdHariIni", "PctPencapaian", "GapHariIni", "TotalGap", "KejarPerhari",
+            "PeriodeBulanLalu", "PeriodeBulanIni"]
+    if df_main is None or df_main.empty or tanggal_acuan is None:
         return pd.DataFrame(columns=cols)
 
     start, end, total_hari, hari_berjalan, sisa_hari = _quarter_bounds(tanggal_acuan)
-    kat_targets = target_map.get(kategori, {}) if target_map else {}
 
-    if df_main is None or df_main.empty:
-        sub = pd.DataFrame(columns=["Cabang", "Tanggal", "Tahun", "Bulan", "TotalHarga", "Kelompok"])
-    elif kategori == "Omset All":
-        sub = df_main
-    else:
-        sub = df_main[df_main["Kelompok"] == kategori]
-
-    branches = set(kat_targets.keys())
-    if not sub.empty:
-        branches |= set(sub["Cabang"].dropna().unique().tolist())
-    if selected_branches:
-        branches &= set(selected_branches)
-        branches |= (set(kat_targets.keys()) & set(selected_branches))
-    branches = order_branches(branches)
-    if not branches:
+    d = df_main.copy()
+    if "Tanggal" not in d.columns:
         return pd.DataFrame(columns=cols)
+    d = d[(d["Tanggal"] >= start) & (d["Tanggal"] <= tanggal_acuan)]
 
-    prev_month = tanggal_acuan.month - 1 or 12
-    prev_year = tanggal_acuan.year if tanggal_acuan.month > 1 else tanggal_acuan.year - 1
-    days_in_prev_month = calendar.monthrange(prev_year, prev_month)[1]
-    days_elapsed_this_month = tanggal_acuan.day
+    if kategori == "Service":
+        d = d[d["Kategori"] == "Service"]
+    elif kategori == "Gadget & Aksesoris":
+        d = d[d["Kategori"] == "Gadget & Aksesoris"]
+
+    if selected_branches:
+        d = d[d["Cabang"].isin(selected_branches)]
+
+    branches = selected_branches if selected_branches else BRANCH_ORDER
+    branch_target = target_map.get(kategori, {}) if target_map else {}
+
+    prev_month_start, prev_month_end = _prev_month_bounds(tanggal_acuan)
+    cur_month_start = date(tanggal_acuan.year, tanggal_acuan.month, 1)
 
     rows = []
-    for cabang in branches:
-        g = sub[sub["Cabang"] == cabang] if not sub.empty else sub
-        target = float(kat_targets.get(cabang, 0.0) or 0.0)
-        omset_harian = (target / total_hari) if total_hari else 0.0
-        expected = omset_harian * hari_berjalan
+    for cabang in order_branches(branches):
+        omset_samurai = float(branch_target.get(cabang, 0) or 0)
+        g = d[d["Cabang"] == cabang]
+        sd_hari_ini = float(g["Omset"].sum()) if not g.empty else 0.0
 
-        hari_ini = float(g[g["Tanggal"] == tanggal_acuan]["TotalHarga"].sum()) if not g.empty else 0.0
-        sd_hari_ini = float(g[(g["Tanggal"] >= start) & (g["Tanggal"] <= tanggal_acuan)]["TotalHarga"].sum()) if not g.empty else 0.0
-        pct = (sd_hari_ini / expected) if expected else 0.0
-        gap_hari_ini = expected - sd_hari_ini
-        total_gap = target - sd_hari_ini
+        omset_harian = omset_samurai / total_hari if total_hari else 0.0
+        expected_value = omset_harian * hari_berjalan
+        pct = (sd_hari_ini / expected_value) if expected_value else None
+        gap_hari_ini = expected_value - sd_hari_ini
+        total_gap = omset_samurai - sd_hari_ini
         kejar_perhari = (total_gap / sisa_hari) if sisa_hari else 0.0
 
-        bulan_lalu_total = float(g[(g["Tahun"] == prev_year) & (g["Bulan"] == prev_month)]["TotalHarga"].sum()) if not g.empty else 0.0
-        periode_bulan_lalu = (bulan_lalu_total / days_in_prev_month) if days_in_prev_month else 0.0
-        bulan_ini_total = float(g[(g["Tahun"] == tanggal_acuan.year) & (g["Bulan"] == tanggal_acuan.month) &
-                                   (g["Tanggal"].apply(lambda d: d.day) <= tanggal_acuan.day)]["TotalHarga"].sum()) if not g.empty else 0.0
-        periode_bulan_ini = (bulan_ini_total / days_elapsed_this_month) if days_elapsed_this_month else 0.0
-        gap_periode = periode_bulan_ini - periode_bulan_lalu
+        g_all = df_main[df_main["Cabang"] == cabang]
+        if kategori == "Service":
+            g_all = g_all[g_all["Kategori"] == "Service"]
+        elif kategori == "Gadget & Aksesoris":
+            g_all = g_all[g_all["Kategori"] == "Gadget & Aksesoris"]
+
+        prev_g = g_all[(g_all["Tanggal"] >= prev_month_start) & (g_all["Tanggal"] <= prev_month_end)]
+        prev_days = (prev_month_end - prev_month_start).days + 1
+        periode_bulan_lalu = (float(prev_g["Omset"].sum()) / prev_days) if prev_days else 0.0
+
+        cur_g = g_all[(g_all["Tanggal"] >= cur_month_start) & (g_all["Tanggal"] <= tanggal_acuan)]
+        cur_days = (tanggal_acuan - cur_month_start).days + 1
+        periode_bulan_ini = (float(cur_g["Omset"].sum()) / cur_days) if cur_days else 0.0
 
         rows.append({
-            "Cabang": cabang, "OmsetSamurai": target, "OmsetHarian": omset_harian,
-            "ExpectedValue": expected, "HariIni": hari_ini, "SdHariIni": sd_hari_ini,
-            "PctPencapaian": pct, "GapHariIni": gap_hari_ini, "TotalGap": total_gap,
-            "KejarPerhari": kejar_perhari, "PeriodeBulanLalu": periode_bulan_lalu,
-            "PeriodeBulanIni": periode_bulan_ini, "GapPeriode": gap_periode,
+            "Cabang": cabang, "OmsetSamurai": omset_samurai, "OmsetHarian": omset_harian,
+            "TotalHari": total_hari, "HariIni": hari_berjalan, "HariBerjalan": hari_berjalan, "SisaHari": sisa_hari,
+            "ExpectedValue": expected_value, "SdHariIni": sd_hari_ini, "PctPencapaian": pct,
+            "GapHariIni": gap_hari_ini, "TotalGap": total_gap, "KejarPerhari": kejar_perhari,
+            "PeriodeBulanLalu": periode_bulan_lalu, "PeriodeBulanIni": periode_bulan_ini,
         })
-
-    df_out = pd.DataFrame(rows)
-
-    total_target = df_out["OmsetSamurai"].sum()
-    total_omset_harian = df_out["OmsetHarian"].sum()
-    total_expected = df_out["ExpectedValue"].sum()
-    total_hari_ini = df_out["HariIni"].sum()
-    total_sd = df_out["SdHariIni"].sum()
-    total_pct = (total_sd / total_expected) if total_expected else 0.0
-    total_gap_hari_ini = total_expected - total_sd
-    total_gap = total_target - total_sd
-    total_kejar = (total_gap / sisa_hari) if sisa_hari else 0.0
-    total_bulan_lalu = df_out["PeriodeBulanLalu"].sum()
-    total_bulan_ini = df_out["PeriodeBulanIni"].sum()
-    total_row = pd.DataFrame([{
-        "Cabang": "SMM", "OmsetSamurai": total_target, "OmsetHarian": total_omset_harian,
-        "ExpectedValue": total_expected, "HariIni": total_hari_ini, "SdHariIni": total_sd,
-        "PctPencapaian": total_pct, "GapHariIni": total_gap_hari_ini, "TotalGap": total_gap,
-        "KejarPerhari": total_kejar, "PeriodeBulanLalu": total_bulan_lalu,
-        "PeriodeBulanIni": total_bulan_ini, "GapPeriode": total_bulan_ini - total_bulan_lalu,
-    }])
-    df_out = pd.concat([df_out, total_row], ignore_index=True)
-    return df_out
+    return pd.DataFrame(rows)
 
 
-def _finalize_scoreboard(df_out: pd.DataFrame) -> pd.DataFrame:
-    return df_out
+def _prev_month_bounds(d: date):
+    if d.month == 1:
+        y, m = d.year - 1, 12
+    else:
+        y, m = d.year, d.month - 1
+    start = date(y, m, 1)
+    end = date(y, m, calendar.monthrange(y, m)[1])
+    return start, end
 
 
-# ========================= Auto-extract Target dari sheet Scoreboard =========================
+def _finalize_scoreboard(df_sb: pd.DataFrame) -> pd.DataFrame:
+    if df_sb.empty:
+        return df_sb
+    total_row = {"Cabang": "TOTAL"}
+    for c in ["OmsetSamurai", "SdHariIni", "ExpectedValue", "GapHariIni", "TotalGap"]:
+        total_row[c] = df_sb[c].sum()
+    total_row["OmsetHarian"] = df_sb["OmsetHarian"].sum()
+    total_row["TotalHari"] = df_sb["TotalHari"].iloc[0] if len(df_sb) else 0
+    total_row["HariIni"] = df_sb["HariIni"].iloc[0] if len(df_sb) else 0
+    total_row["SisaHari"] = df_sb["SisaHari"].iloc[0] if len(df_sb) else 0
+    total_row["PctPencapaian"] = (total_row["SdHariIni"] / total_row["ExpectedValue"]) if total_row["ExpectedValue"] else None
+    total_row["KejarPerhari"] = (total_row["TotalGap"] / total_row["SisaHari"]) if total_row["SisaHari"] else 0.0
+    total_row["PeriodeBulanLalu"] = df_sb["PeriodeBulanLalu"].sum()
+    total_row["PeriodeBulanIni"] = df_sb["PeriodeBulanIni"].sum()
+    return pd.concat([df_sb, pd.DataFrame([total_row])], ignore_index=True)
+
+
+# ========================= Target Auto-Extraction dari Sheet Scoreboard ==========================
 
 _SECTION_MARKERS = {
-    "SCOREBOARD OMSET ALL": "Omset All",
-    "SCOREBOARD OMSET SERVICE": "Service",
-    "SCOREBOARD OMSET GADGET & AKSESORIS": "Gadget & Aksesoris",
+    "Omset All": "SCOREBOARD OMSET ALL",
+    "Service": "SCOREBOARD OMSET SERVICE",
+    "Gadget & Aksesoris": "SCOREBOARD OMSET GADGET",
 }
 
 
-def _read_scoreboard_sections(path: str):
-    """Pindai sheet 'Scoreboard' pada file yang di-upload, kembalikan dict:
-    {kategori: {cabang: omset_samurai}} dan tanggal snapshot (jika ada)."""
-    result = {v: {} for v in _SECTION_MARKERS.values()}
-    snapshot_date = None
+def _read_scoreboard_sections(path: str) -> dict:
+    """Baca sheet 'Scoreboard' pada file Excel utama, ekstrak target Omset Samurai per kategori & cabang."""
+    result = {k: {} for k in SCOREBOARD_KATEGORI}
     try:
-        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        wb = openpyxl.load_workbook(path, data_only=True)
     except Exception:
-        return result, snapshot_date
+        return result
     sheet_name = None
-    for name in wb.sheetnames:
-        if name.strip().upper() == "SCOREBOARD":
-            sheet_name = name
+    for sn in wb.sheetnames:
+        if "scoreboard" in sn.lower():
+            sheet_name = sn
             break
-    if sheet_name is None:
-        wb.close()
-        return result, snapshot_date
+    if not sheet_name:
+        return result
     ws = wb[sheet_name]
 
-    current_kategori = None
-    header_map = None
-    for row in ws.iter_rows(values_only=True):
-        if row is None:
-            continue
-        row_vals = list(row)
-        joined = " ".join(str(c).strip().upper() for c in row_vals if c)
-        matched_kategori = None
-        for marker, kat in _SECTION_MARKERS.items():
-            if marker in joined:
-                matched_kategori = kat
+    rows = list(ws.iter_rows(values_only=True))
+    current_kat = None
+    header_row_idx = None
+    cabang_col = None
+    samurai_col = None
+    for i, row in enumerate(rows):
+        row_text = " ".join([str(c) for c in row if c is not None]).upper()
+        matched_kat = None
+        for kat, marker in _SECTION_MARKERS.items():
+            if marker in row_text:
+                matched_kat = kat
                 break
-        if matched_kategori:
-            current_kategori = matched_kategori
-            header_map = None
-            for c in row_vals:
-                if isinstance(c, (datetime, date)):
-                    snapshot_date = c if isinstance(c, date) and not isinstance(c, datetime) else c.date()
+        if matched_kat:
+            current_kat = matched_kat
+            header_row_idx = None
+            cabang_col = None
+            samurai_col = None
             continue
-        if current_kategori is None:
+        if current_kat is None:
             continue
-        up_vals = [str(c).strip().upper() if c is not None else None for c in row_vals]
-        if "CABANG" in up_vals and "OMSET SAMURAI" in up_vals:
-            header_map = {v: i for i, v in enumerate(up_vals) if v}
+        if header_row_idx is None:
+            for j, cell in enumerate(row):
+                if cell is None:
+                    continue
+                cl = str(cell).strip().upper()
+                if cl == "CABANG":
+                    cabang_col = j
+                elif "SAMURAI" in cl or ("TARGET" in cl and "OMSET" in cl):
+                    samurai_col = j
+            if cabang_col is not None and samurai_col is not None:
+                header_row_idx = i
             continue
-        if header_map is None:
+        cabang_val = row[cabang_col] if cabang_col < len(row) else None
+        samurai_val = row[samurai_col] if samurai_col < len(row) else None
+        if cabang_val is None:
             continue
-        idx_cabang = header_map.get("CABANG")
-        idx_target = header_map.get("OMSET SAMURAI")
-        if idx_cabang is None or idx_target is None or idx_cabang >= len(row_vals):
+        cabang_str = str(cabang_val).strip().upper()
+        if cabang_str in ("", "TOTAL", "GRAND TOTAL"):
+            if cabang_str == "TOTAL":
+                current_kat = None
             continue
-        cabang_raw = row_vals[idx_cabang]
-        if not cabang_raw:
-            continue
-        cabang = str(cabang_raw).strip().upper()
-        if cabang not in BRANCH_ORDER:
-            if cabang in ("SMM", "TOTAL", "GRAND TOTAL"):
-                continue
-            if cabang not in [m.upper() for m in _SECTION_MARKERS]:
+        matched_branch = None
+        for b in BRANCH_ORDER:
+            if b == cabang_str or b in cabang_str or cabang_str in b:
+                matched_branch = b
+                break
+        if matched_branch and samurai_val is not None:
+            try:
+                result[current_kat][matched_branch] = float(samurai_val)
+            except (ValueError, TypeError):
                 pass
-        target_val = _to_float_or_none(row_vals[idx_target]) if idx_target < len(row_vals) else None
-        if cabang in BRANCH_ORDER and target_val is not None:
-            result[current_kategori][cabang] = target_val
-    wb.close()
-    return result, snapshot_date
+    return result
 
 
-def extract_scoreboard_target(paths) -> dict:
-    """Gabungkan target dari beberapa file (ambil yang punya sheet Scoreboard)."""
-    merged = {v: {} for v in _SECTION_MARKERS.values()}
-    if isinstance(paths, str):
-        paths = [paths]
-    for p in paths:
-        try:
-            sections, _ = _read_scoreboard_sections(p)
-        except Exception:
-            continue
-        for kat, d in sections.items():
-            merged[kat].update(d)
-    return merged
+def extract_scoreboard_target(path: str) -> dict:
+    return _read_scoreboard_sections(path)
 
 
-def extract_scoreboard_snapshot_date(paths):
-    if isinstance(paths, str):
-        paths = [paths]
-    for p in paths:
-        try:
-            _, snap = _read_scoreboard_sections(p)
-            if snap:
-                return snap
-        except Exception:
-            continue
+def extract_scoreboard_snapshot_date(path: str):
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception:
+        return None
+    sheet_name = None
+    for sn in wb.sheetnames:
+        if "periode" in sn.lower():
+            sheet_name = sn
+            break
+    if not sheet_name:
+        return None
+    ws = wb[sheet_name]
+    for row in ws.iter_rows(values_only=True):
+        for cell in row:
+            if isinstance(cell, datetime):
+                return cell.date()
+            if isinstance(cell, date):
+                return cell
     return None
 
 
-def extract_scoreboard_corporate(paths):
-    """Best-effort: tidak dipakai untuk perhitungan utama — tab Kontribusi MC
-    memakai data transaksi langsung (lebih akurat & real-time)."""
-    return {}
+def extract_scoreboard_corporate(path: str) -> pd.DataFrame:
+    """Stub: ekstraksi kontribusi corporate dari sheet Scoreboard (belum ada format standar)."""
+    return pd.DataFrame(columns=["Cabang", "Nama Marketing", "Omset Corporate"])
 
 
-# ========================= Render & Export Scoreboard =========================
+# ========================= Scoreboard Render ==========================
 
 def _fmt_scoreboard_cell(col: str, val) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "-"
     if col == "PctPencapaian":
         return format_percent(val)
     if col in MONEY_COLS:
         return format_rupiah(val)
+    if col in ("TotalHari", "HariIni", "HariBerjalan", "SisaHari"):
+        return format_number(val)
     return str(val)
 
 
-_SCOREBOARD_COL_ORDER = [
-    ("OmsetSamurai", "OMSET SAMURAI"), ("OmsetHarian", "OMSET HARIAN"), ("ExpectedValue", "EXPECTED VALUE"),
-    ("HariIni", "HARI INI"), ("SdHariIni", "S/D HARI INI"), ("PctPencapaian", "% PENCAPAIAN"),
-    ("GapHariIni", "GAP HARI INI"), ("TotalGap", "TOTAL GAP"), ("KejarPerhari", "KEJAR TARGET/HARI"),
-    ("PeriodeBulanLalu", "PERIODE BULAN LALU"), ("PeriodeBulanIni", "PERIODE BULAN INI"), ("GapPeriode", "GAP"),
-]
-_SCOREBOARD_GROUPS = [
-    ("DETAIL TARGET", 3, "#0f766e"), ("DETAIL PENCAPAIAN", 3, "#1d4ed8"),
-    ("DETAIL GAP", 3, "#b45309"), ("MONITORING PROGRESS RATA-RATA/HARI", 3, "#6d28d9"),
-]
+_SCOREBOARD_COL_ORDER = ["Cabang", "OmsetSamurai", "OmsetHarian", "TotalHari", "HariIni", "SisaHari",
+                         "ExpectedValue", "SdHariIni", "PctPencapaian", "GapHariIni", "TotalGap", "KejarPerhari",
+                         "PeriodeBulanLalu", "PeriodeBulanIni"]
+_SCOREBOARD_GROUPS = {
+    "Cabang": "Cabang", "OmsetSamurai": "Target (Omset Samurai)", "OmsetHarian": "Omset Harian",
+    "TotalHari": "Total Hari", "HariIni": "Hari Berjalan", "SisaHari": "Sisa Hari",
+    "ExpectedValue": "Expected Value", "SdHariIni": "S/D Hari Ini", "PctPencapaian": "% Pencapaian",
+    "GapHariIni": "Gap Hari Ini", "TotalGap": "Total Gap", "KejarPerhari": "Kejar/Hari",
+    "PeriodeBulanLalu": "Rata2 Bulan Lalu", "PeriodeBulanIni": "Rata2 Bulan Ini",
+}
 
 
-def render_scoreboard_html(df_score: pd.DataFrame, title: str, periode_label: str = "") -> str:
-    if df_score.empty:
-        return "<i>Belum ada data/target untuk kategori ini.</i>"
-
-    group_header = ""
-    for label, span, color in _SCOREBOARD_GROUPS:
-        group_header += f'<th colspan="{span}" style="background:{color};color:white;padding:5px;border:1px solid #d1d5db;">{label}</th>'
-    col_header = '<th style="padding:6px 8px;border:1px solid #d1d5db;background:#111827;color:white;">CABANG</th>'
-    for _, label in _SCOREBOARD_COL_ORDER:
-        col_header += f'<th style="padding:6px 8px;border:1px solid #d1d5db;background:#374151;color:white;font-size:0.82em;">{label}</th>'
-
+def render_scoreboard_html(df_sb: pd.DataFrame, kategori: str) -> str:
+    if df_sb.empty:
+        return "<i>Tidak ada data scoreboard untuk kategori ini.</i>"
+    header_cells = "".join(f'<th style="padding:5px 8px;border:1px solid #d1d5db;white-space:nowrap;">{_SCOREBOARD_GROUPS.get(c, c)}</th>' for c in _SCOREBOARD_COL_ORDER)
     body_rows = ""
-    for _, r in df_score.iterrows():
-        is_total = str(r["Cabang"]) == "SMM"
-        row_bg = "#f3f4f6" if is_total else "#ffffff"
-        fw = "800" if is_total else "500"
-        tds = f'<td style="padding:5px 8px;border:1px solid #d1d5db;font-weight:{fw};background:{row_bg};">{r["Cabang"]}</td>'
-        for col, _label in _SCOREBOARD_COL_ORDER:
-            val = r[col]
-            txt = _fmt_scoreboard_cell(col, val)
-            cell_bg = row_bg
-            cell_color = "#111827"
-            if col == "PctPencapaian":
-                cell_color = pencapaian_color(val)
-                tds_style_extra = "font-weight:700;"
-            else:
-                tds_style_extra = ""
-            if col in ("GapHariIni", "TotalGap", "GapPeriode"):
-                cell_color = "#16a34a" if val >= 0 else "#dc2626"
-            tds += (f'<td style="padding:5px 8px;border:1px solid #d1d5db;background:{cell_bg};'
-                    f'color:{cell_color};text-align:right;font-weight:{fw};{tds_style_extra}">{txt}</td>')
-        body_rows += f"<tr>{tds}</tr>"
-
-    header_label = f" — {periode_label}" if periode_label else ""
+    for _, r in df_sb.iterrows():
+        is_total = str(r["Cabang"]).upper() == "TOTAL"
+        row_bg = "#f0fdfa" if is_total else "white"
+        fw = "700" if is_total else "400"
+        cells = ""
+        for c in _SCOREBOARD_COL_ORDER:
+            val = r.get(c)
+            txt = _fmt_scoreboard_cell(c, val)
+            align = "left" if c == "Cabang" else "right"
+            extra_style = ""
+            if c == "PctPencapaian" and val is not None and not (isinstance(val, float) and pd.isna(val)):
+                extra_style = f"color:{pencapaian_color(val)};font-weight:700;"
+            cells += f'<td style="padding:5px 8px;border:1px solid #d1d5db;text-align:{align};font-weight:{fw};{extra_style}">{txt}</td>'
+        body_rows += f'<tr style="background:{row_bg};">{cells}</tr>'
+    title = _SCOREBOARD_KATEGORI_LABEL.get(kategori, kategori)
     return f"""
-    <div style="border:2px solid #111827;border-radius:10px;overflow-x:auto;">
-    <div style="background:#111827;color:white;padding:8px 12px;font-weight:700;">
-        🏆 {title}{header_label}
-    </div>
-    <table style="border-collapse:collapse;width:100%;font-size:0.85em;min-width:1100px;">
-        <thead>
-            <tr><th style="border:1px solid #d1d5db;background:#111827;"></th>{group_header}</tr>
-            <tr>{col_header}</tr>
-        </thead>
+    <div style="border:2px solid #0f766e;border-radius:10px;overflow-x:auto;margin-bottom:14px;">
+    <div style="background:#0f766e;color:white;padding:8px 12px;font-weight:700;">🏆 {title}</div>
+    <table style="border-collapse:collapse;width:100%;font-size:0.85em;">
+        <thead><tr style="background:#ccfbf1;">{header_cells}</tr></thead>
         <tbody>{body_rows}</tbody>
     </table>
     </div>
     """
 
 
-def generate_scoreboard_table_image(df_score: pd.DataFrame, title: str, periode_label: str = "") -> bytes:
-    full_title = title + (f" — {periode_label}" if periode_label else "")
-    if df_score.empty:
-        fig, ax = plt.subplots(figsize=(10, 2.5))
+# ========================= Scoreboard Export (JPG/PDF) ==========================
+
+def generate_scoreboard_table_image(df_sb: pd.DataFrame, kategori: str) -> bytes:
+    title0 = _SCOREBOARD_KATEGORI_LABEL.get(kategori, kategori)
+    if df_sb.empty:
+        fig, ax = plt.subplots(figsize=(10, 2.2))
         ax.axis("off")
-        ax.set_title(full_title, fontsize=15, fontweight="bold", color="#111827", pad=18)
-        ax.text(0.5, 0.5, "Belum ada data/target untuk kategori ini.", ha="center", va="center", fontsize=11, color="#6b7280")
+        ax.set_title(title0, fontsize=12, fontweight="bold", color="#0f766e", pad=14)
+        ax.text(0.5, 0.5, "Tidak ada data untuk kategori ini.", ha="center", va="center", fontsize=10, color="#6b7280")
         buf = io.BytesIO()
-        fig.savefig(buf, format="jpg", dpi=180, bbox_inches="tight")
+        fig.savefig(buf, format="jpg", dpi=200, bbox_inches="tight")
         plt.close(fig)
         buf.seek(0)
         return buf.read()
 
-    n = len(df_score)
-    fig_w = 20
-    fig_h = max(2.2, 0.42 * n + 1.6)
+    col_labels = [_SCOREBOARD_GROUPS.get(c, c) for c in _SCOREBOARD_COL_ORDER]
+    cell_text = []
+    for _, r in df_sb.iterrows():
+        cell_text.append([_fmt_scoreboard_cell(c, r.get(c)) for c in _SCOREBOARD_COL_ORDER])
+
+    n = len(df_sb)
+    fig_w = max(12, 1.1 * len(_SCOREBOARD_COL_ORDER))
+    fig_h = max(2.0, 0.45 * n + 1.4)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     ax.axis("off")
-    ax.set_title(full_title, fontsize=15, fontweight="bold", color="#111827", pad=18)
-
-    col_labels = ["CABANG"] + [label for _, label in _SCOREBOARD_COL_ORDER]
-    cell_text = []
-    for _, r in df_score.iterrows():
-        row = [r["Cabang"]] + [_fmt_scoreboard_cell(col, r[col]) for col, _ in _SCOREBOARD_COL_ORDER]
-        cell_text.append(row)
+    ax.set_title(title0, fontsize=13, fontweight="bold", color="#0f766e", pad=16)
 
     tbl = ax.table(cellText=cell_text, colLabels=col_labels, loc="center", cellLoc="center")
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(8)
-    tbl.scale(1, 1.7)
-    pct_col_idx = 1 + [c for c, _ in _SCOREBOARD_COL_ORDER].index("PctPencapaian")
-    gap_cols_idx = [1 + [c for c, _ in _SCOREBOARD_COL_ORDER].index(c) for c in ("GapHariIni", "TotalGap", "GapPeriode")]
+    tbl.scale(1, 1.5)
     for (row, col), cell in tbl.get_celld().items():
         cell.set_edgecolor("#d1d5db")
         if row == 0:
-            cell.set_facecolor("#111827")
+            cell.set_facecolor("#0f766e")
             cell.set_text_props(color="white", fontweight="bold")
-            continue
-        r_data = df_score.iloc[row - 1]
-        is_total = str(r_data["Cabang"]) == "SMM"
-        cell.set_facecolor("#f3f4f6" if is_total else "white")
-        if col == pct_col_idx:
-            cell.set_text_props(color=pencapaian_color(r_data["PctPencapaian"]), fontweight="bold")
-        elif col in gap_cols_idx:
-            gap_col_name = ("GapHariIni", "TotalGap", "GapPeriode")[gap_cols_idx.index(col)]
-            v = r_data[gap_col_name]
-            cell.set_text_props(color="#16a34a" if v >= 0 else "#dc2626")
-        if is_total:
-            cell.set_text_props(fontweight="bold")
+        else:
+            is_total = str(df_sb.iloc[row - 1]["Cabang"]).upper() == "TOTAL"
+            cell.set_facecolor("#f0fdfa" if is_total else "white")
+            col_name = _SCOREBOARD_COL_ORDER[col]
+            if col_name == "PctPencapaian":
+                pct_val = df_sb.iloc[row - 1].get("PctPencapaian")
+                if pct_val is not None and not (isinstance(pct_val, float) and pd.isna(pct_val)):
+                    cell.set_text_props(color=pencapaian_color(pct_val), fontweight="bold")
     buf = io.BytesIO()
     fig.tight_layout()
-    fig.savefig(buf, format="jpg", dpi=180, bbox_inches="tight")
+    fig.savefig(buf, format="jpg", dpi=200, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
 
-def generate_scoreboard_pdf(scoreboards: dict, periode_label: str = "") -> bytes:
-    """scoreboards: {kategori_label(str): df_score}. Menghasilkan satu PDF landscape
-    berisi seluruh kategori Scoreboard, siap dibagikan ke tim."""
+def generate_scoreboard_pdf(sb_dict: dict) -> bytes:
+    """sb_dict: {kategori: df_scoreboard} -> satu PDF landscape berisi semua kategori."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=1 * cm, bottomMargin=1 * cm,
-                             leftMargin=0.8 * cm, rightMargin=0.8 * cm)
+                             leftMargin=1 * cm, rightMargin=1 * cm)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("title", parent=styles["Title"], fontSize=15, textColor=rl_colors.HexColor("#111827"))
-    sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, textColor=rl_colors.HexColor("#4b5563"))
-    elements = [Paragraph("Scoreboard Omset MFlash", title_style)]
-    if periode_label:
-        elements.append(Paragraph(periode_label, sub_style))
-    elements.append(Spacer(1, 10))
-
-    headers = ["CABANG"] + [label for _, label in _SCOREBOARD_COL_ORDER]
-    for title, df_score in scoreboards.items():
-        elements.append(Paragraph(title, ParagraphStyle("h2", parent=styles["Heading2"], fontSize=12,
-                                                          textColor=rl_colors.HexColor("#111827"))))
-        elements.append(Spacer(1, 4))
-        if df_score.empty:
-            elements.append(Paragraph("Belum ada data/target untuk kategori ini.", styles["Normal"]))
-            elements.append(Spacer(1, 10))
-            continue
-        data = [headers]
-        text_colors = []
-        for _, r in df_score.iterrows():
-            row = [r["Cabang"]] + [_fmt_scoreboard_cell(col, r[col]) for col, _ in _SCOREBOARD_COL_ORDER]
-            data.append(row)
-        n_cols = len(headers)
-        col_w = (26 * cm) / n_cols
-        table = Table(data, colWidths=[col_w] * n_cols, repeatRows=1)
-        style_cmds = [
-            ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#111827")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.HexColor("#d1d5db")),
-            ("ALIGN", (1, 0), (-1, -1), "CENTER"),
-            ("FONTSIZE", (0, 0), (-1, -1), 6.7),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ]
-        pct_idx = 1 + [c for c, _ in _SCOREBOARD_COL_ORDER].index("PctPencapaian")
-        for i, (_, r) in enumerate(df_score.iterrows(), start=1):
-            if str(r["Cabang"]) == "SMM":
-                style_cmds.append(("BACKGROUND", (0, i), (-1, i), rl_colors.HexColor("#f3f4f6")))
-                style_cmds.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
-            pct_color = rl_colors.HexColor(pencapaian_color(r["PctPencapaian"]))
-            style_cmds.append(("TEXTCOLOR", (pct_idx, i), (pct_idx, i), pct_color))
-        table.setStyle(TableStyle(style_cmds))
-        elements.append(table)
-        elements.append(Spacer(1, 16))
-
+    title_style = ParagraphStyle("title", parent=styles["Title"], fontSize=14, textColor=rl_colors.HexColor("#0f766e"))
+    elements = []
+    for kategori, df_sb in sb_dict.items():
+        elements.append(Paragraph(_SCOREBOARD_KATEGORI_LABEL.get(kategori, kategori), title_style))
+        elements.append(Spacer(1, 8))
+        if df_sb.empty:
+            elements.append(Paragraph("Tidak ada data untuk kategori ini.", styles["Normal"]))
+        else:
+            col_labels = [_SCOREBOARD_GROUPS.get(c, c) for c in _SCOREBOARD_COL_ORDER]
+            data = [col_labels]
+            for _, r in df_sb.iterrows():
+                data.append([_fmt_scoreboard_cell(c, r.get(c)) for c in _SCOREBOARD_COL_ORDER])
+            table = Table(data, repeatRows=1)
+            style_cmds = [
+                ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#0f766e")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.HexColor("#d1d5db")),
+                ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]
+            for i, (_, r) in enumerate(df_sb.iterrows(), start=1):
+                if str(r["Cabang"]).upper() == "TOTAL":
+                    style_cmds.append(("BACKGROUND", (0, i), (-1, i), rl_colors.HexColor("#f0fdfa")))
+                    style_cmds.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+            table.setStyle(TableStyle(style_cmds))
+            elements.append(table)
+        elements.append(Spacer(1, 18))
     doc.build(elements)
     buf.seek(0)
     return buf.read()
 
 
-# ========================= Progress Ring, Pie, Daily Charts =========================
+# ========================= Progress Ring / Charts ==========================
 
-def render_progress_ring(label: str, pct: float, sub: str = ""):
-    pct_display = max(0.0, pct)
+def render_progress_ring(pct: float, label: str, size: int = 130) -> str:
+    pct_clamped = max(0.0, min(1.0, pct if pct is not None else 0.0))
     color = pencapaian_color(pct)
-    fig = go.Figure(go.Pie(
-        values=[min(pct_display, 1.0), max(0.0, 1.0 - min(pct_display, 1.0))],
-        hole=0.72, marker=dict(colors=[color, "#e5e7eb"]), textinfo="none", sort=False, direction="clockwise",
-    ))
-    fig.update_layout(
-        showlegend=False, margin=dict(l=0, r=0, t=0, b=0), height=180,
-        annotations=[dict(text=f"<b>{format_percent(pct)}</b>", x=0.5, y=0.5, font_size=20, showarrow=False,
-                           font_color=color)],
-    )
-    st.plotly_chart(fig, use_container_width=True, key=f"ring_{label}_{sub}")
-    st.markdown(f"<div style='text-align:center;font-weight:600;'>{label}</div>", unsafe_allow_html=True)
+    deg = pct_clamped * 360
+    pct_text = format_percent(pct) if pct is not None else "-"
+    return f"""
+    <div style="display:flex;flex-direction:column;align-items:center;margin:6px;">
+        <div style="width:{size}px;height:{size}px;border-radius:50%;
+            background:conic-gradient({color} {deg}deg, #e5e7eb {deg}deg);
+            display:flex;align-items:center;justify-content:center;">
+            <div style="width:{size-24}px;height:{size-24}px;border-radius:50%;background:white;
+                display:flex;align-items:center;justify-content:center;flex-direction:column;">
+                <span style="font-size:1.1em;font-weight:800;color:{color};">{pct_text}</span>
+            </div>
+        </div>
+        <span style="margin-top:6px;font-size:0.85em;font-weight:600;color:#374151;text-align:center;">{label}</span>
+    </div>
+    """
 
 
-def render_contribution_pie(labels, values, key):
-    fig = go.Figure(go.Pie(labels=labels, values=values, hole=0.4))
-    fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=320)
-    st.plotly_chart(fig, use_container_width=True, key=key)
+def render_contribution_pie(labels: list, values: list, colors: list, title: str = ""):
+    fig = go.Figure(data=[go.Pie(labels=labels, values=values, marker=dict(colors=colors), hole=0.45)])
+    fig.update_layout(title=title, showlegend=True, height=320, margin=dict(t=40, b=10, l=10, r=10))
+    return fig
 
 
-def build_daily_progress(df_main: pd.DataFrame, tanggal_acuan: date, target_map: dict,
-                          kategori: str, selected_branches=None) -> pd.DataFrame:
+def build_daily_progress(df_main: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
     if df_main is None or df_main.empty or tanggal_acuan is None:
-        return pd.DataFrame(columns=["Tanggal", "Actual", "Target"])
-    start, end, total_hari, hari_berjalan, sisa_hari = _quarter_bounds(tanggal_acuan)
-    sub = df_main if kategori == "Omset All" else df_main[df_main["Kelompok"] == kategori]
+        return pd.DataFrame(columns=["Tanggal", "Omset"])
+    start, end, *_ = _quarter_bounds(tanggal_acuan)
+    d = df_main[(df_main["Tanggal"] >= start) & (df_main["Tanggal"] <= tanggal_acuan)]
     if selected_branches:
-        sub = sub[sub["Cabang"].isin(selected_branches)]
-    kat_targets = target_map.get(kategori, {}) if target_map else {}
-    if selected_branches:
-        total_target = sum(v for k, v in kat_targets.items() if k in selected_branches)
-    else:
-        total_target = sum(kat_targets.values())
-    daily_target = (total_target / total_hari) if total_hari else 0.0
-    sub = sub[(sub["Tanggal"] >= start) & (sub["Tanggal"] <= tanggal_acuan)]
-    g = sub.groupby("Tanggal")["TotalHarga"].sum().reindex(
-        pd.date_range(start, tanggal_acuan).date, fill_value=0
-    ).reset_index()
-    g.columns = ["Tanggal", "Actual"]
-    g["ActualCum"] = g["Actual"].cumsum()
-    g["TargetCum"] = [daily_target * (i + 1) for i in range(len(g))]
+        d = d[d["Cabang"].isin(selected_branches)]
+    if d.empty:
+        return pd.DataFrame(columns=["Tanggal", "Omset"])
+    g = d.groupby("Tanggal")["Omset"].sum().reset_index().sort_values("Tanggal")
     return g
 
 
-def render_daily_progress_chart(g: pd.DataFrame, key: str):
-    if g.empty:
-        st.info("Belum ada data untuk grafik progres harian.")
-        return
+def render_daily_progress_chart(g: pd.DataFrame):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=g["Tanggal"], y=g["ActualCum"], mode="lines+markers", name="Realisasi Kumulatif",
-                              line=dict(color="#1d4ed8", width=3)))
-    fig.add_trace(go.Scatter(x=g["Tanggal"], y=g["TargetCum"], mode="lines", name="Pace Target",
-                              line=dict(color="#dc2626", width=2, dash="dash")))
-    fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=340, legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig, use_container_width=True, key=key)
+    fig.add_trace(go.Scatter(x=g["Tanggal"], y=g["Omset"], mode="lines+markers", line=dict(color="#0f766e", width=2),
+                              marker=dict(size=5), fill="tozeroy", fillcolor="rgba(15,118,110,0.1)"))
+    fig.update_layout(height=320, margin=dict(t=20, b=10, l=10, r=10), xaxis_title="Tanggal", yaxis_title="Omset")
+    return fig
 
 
-def build_daily_history(log_df: pd.DataFrame, cabang=None, bulan=None, tahun=None) -> pd.DataFrame:
-    if log_df is None or log_df.empty:
-        return pd.DataFrame()
-    d = log_df.copy()
-    if cabang:
-        d = d[d["Cabang"] == cabang]
-    if bulan:
-        d = d[d["Bulan"] == bulan]
-    if tahun:
-        d = d[d["Tahun"] == tahun]
-    return d.sort_values("Tanggal")
-
-
-def render_daily_history_chart(d: pd.DataFrame, key: str):
+def build_daily_history(df_main: pd.DataFrame, selected_branches=None, n_days: int = 30) -> pd.DataFrame:
+    if df_main is None or df_main.empty:
+        return pd.DataFrame(columns=["Tanggal", "Omset"])
+    d = df_main.copy()
+    if selected_branches:
+        d = d[d["Cabang"].isin(selected_branches)]
     if d.empty:
-        st.info("Tidak ada riwayat untuk filter ini.")
-        return
-    fig = px.bar(d, x="Tanggal", y="OmsetHarian", color_discrete_sequence=["#0f766e"])
-    fig.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=320)
-    st.plotly_chart(fig, use_container_width=True, key=key)
+        return pd.DataFrame(columns=["Tanggal", "Omset"])
+    g = d.groupby("Tanggal")["Omset"].sum().reset_index().sort_values("Tanggal")
+    return g.tail(n_days)
 
 
-# ========================= 6 Pilar MFlash =========================
+def render_daily_history_chart(g: pd.DataFrame):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=g["Tanggal"], y=g["Omset"], marker_color="#0f766e"))
+    fig.update_layout(height=300, margin=dict(t=20, b=10, l=10, r=10), xaxis_title="Tanggal", yaxis_title="Omset")
+    return fig
 
-def build_pilar_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    cols = ["Pilar", "Omset", "Qty", "GrossProfit"]
-    if df is None or df.empty:
+
+# ========================= 6 Pilar ==========================
+
+def build_pilar_summary(df_main: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    cols = ["Pilar", "Omset", "Qty"]
+    if df_main is None or df_main.empty or tanggal_acuan is None or "Pilar" not in df_main.columns:
         return pd.DataFrame(columns=cols)
-    d = df
-    if tanggal_acuan is not None:
-        d = d[(d["Tahun"] == tanggal_acuan.year) & (d["Bulan"] == tanggal_acuan.month) &
-              (d["Tanggal"].apply(lambda x: x.day) <= tanggal_acuan.day)]
+    start, end, *_ = _quarter_bounds(tanggal_acuan)
+    d = df_main[(df_main["Tanggal"] >= start) & (df_main["Tanggal"] <= tanggal_acuan)]
     if selected_branches:
         d = d[d["Cabang"].isin(selected_branches)]
     if d.empty:
         return pd.DataFrame(columns=cols)
-    g = d.groupby("Pilar").agg(Omset=("TotalHarga", "sum"), Qty=("Qty", "sum"), GrossProfit=("GrossProfit", "sum")).reset_index()
-    g["Pilar"] = pd.Categorical(g["Pilar"], categories=PILAR_ORDER, ordered=True)
-    return g.sort_values("Pilar").reset_index(drop=True)
+    g = d.groupby("Pilar").agg(Omset=("Omset", "sum"), Qty=("Qty", "sum")).reset_index()
+    g["_order"] = g["Pilar"].apply(lambda p: PILAR_ORDER.index(p) if p in PILAR_ORDER else 99)
+    g = g.sort_values("_order").drop(columns="_order").reset_index(drop=True)
+    return g
 
 
-def build_pilar_by_branch(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    d = df
-    if tanggal_acuan is not None:
-        d = d[(d["Tahun"] == tanggal_acuan.year) & (d["Bulan"] == tanggal_acuan.month) &
-              (d["Tanggal"].apply(lambda x: x.day) <= tanggal_acuan.day)]
+def build_pilar_by_branch(df_main: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    cols = ["Cabang", "Pilar", "Omset", "Qty"]
+    if df_main is None or df_main.empty or tanggal_acuan is None or "Pilar" not in df_main.columns:
+        return pd.DataFrame(columns=cols)
+    start, end, *_ = _quarter_bounds(tanggal_acuan)
+    d = df_main[(df_main["Tanggal"] >= start) & (df_main["Tanggal"] <= tanggal_acuan)]
     if selected_branches:
         d = d[d["Cabang"].isin(selected_branches)]
     if d.empty:
-        return pd.DataFrame()
-    piv = d.pivot_table(index="Cabang", columns="Pilar", values="TotalHarga", aggfunc="sum", fill_value=0)
-    for p in PILAR_ORDER:
-        if p not in piv.columns:
-            piv[p] = 0
-    piv = piv[PILAR_ORDER]
-    piv["Total"] = piv.sum(axis=1)
-    branches_present = order_branches(piv.index.tolist())
-    piv = piv.reindex(branches_present)
-    piv = piv.reset_index()
-    return piv
+        return pd.DataFrame(columns=cols)
+    g = d.groupby(["Cabang", "Pilar"]).agg(Omset=("Omset", "sum"), Qty=("Qty", "sum")).reset_index()
+    return g
 
 
 def generate_pilar_insights(pilar_summary: pd.DataFrame) -> list:
@@ -1871,354 +1799,395 @@ def generate_pilar_insights(pilar_summary: pd.DataFrame) -> list:
         return insights
     for _, r in pilar_summary.iterrows():
         share = r["Omset"] / total
-        if share < 0.03 and r["Pilar"] != "Lainnya":
+        if share < 0.03:
             insights.append({
-                "level": "warn", "category": r["Pilar"],
-                "title": f"{_pilar_label(r['Pilar'])}: kontribusi masih kecil ({format_percent(share)})",
-                "problem": f"Omset {_pilar_label(r['Pilar'])} baru {format_rupiah(r['Omset'])} dari total {format_rupiah(total)}.",
-                "online": ["Promosikan kategori ini lebih intensif di media sosial"],
-                "offline": ["Latih tim sales untuk cross-sell kategori ini ke pelanggan yang datang"],
+                "level": "warn",
+                "category": r["Pilar"],
+                "title": f"{_pilar_label(r['Pilar'])}: kontribusi masih sangat kecil ({format_percent(share)})",
+                "problem": f"Omset pilar ini hanya {format_rupiah(r['Omset'])} dari total {format_rupiah(total)}.",
+                "online": ["Promosikan pilar ini lebih intensif di sosial media & katalog online"],
+                "offline": ["Latih tim sales untuk cross-selling pilar ini ke pelanggan yang datang"],
             })
     return insights
 
 
-def render_pilar_kpi_card(row):
-    render_kpi_card_text(_pilar_label(row["Pilar"]), format_rupiah(row["Omset"]), PILAR_COLORS.get(row["Pilar"], "#111827"))
+def render_pilar_kpi_card(pilar: str, omset: float, qty: float) -> str:
+    icon = PILAR_ICONS.get(pilar, "🧩")
+    color = PILAR_COLORS.get(pilar, "#0f766e")
+    show_qty = pilar in _PILAR_SHOW_QTY
+    qty_html = f'<div style="font-size:0.8em;color:#6b7280;">Qty: {format_number(qty)}</div>' if show_qty else ""
+    return f"""
+    <div style="border:2px solid {color};border-radius:10px;padding:10px 14px;text-align:center;background:white;">
+        <div style="font-size:1.6em;">{icon}</div>
+        <div style="font-size:0.82em;font-weight:700;color:{color};margin:4px 0;">{_pilar_label(pilar)}</div>
+        <div style="font-size:1.05em;font-weight:800;color:#111827;">{format_rupiah(omset)}</div>
+        {qty_html}
+    </div>
+    """
 
 
-def render_pilar_table_html(piv: pd.DataFrame) -> str:
-    if piv.empty:
-        return "<i>Tidak ada data.</i>"
-    header = "<th style='padding:5px 8px;border:1px solid #d1d5db;background:#111827;color:white;'>Cabang</th>"
-    for p in PILAR_ORDER + ["Total"]:
-        header += f"<th style='padding:5px 8px;border:1px solid #d1d5db;background:#374151;color:white;'>{p}</th>"
-    body = ""
-    for _, r in piv.iterrows():
-        body += f"<tr><td style='padding:5px 8px;border:1px solid #d1d5db;font-weight:600;'>{r['Cabang']}</td>"
-        for p in PILAR_ORDER + ["Total"]:
-            body += f"<td style='padding:5px 8px;border:1px solid #d1d5db;text-align:right;'>{format_rupiah(r[p])}</td>"
-        body += "</tr>"
-    return f"""<div style="overflow-x:auto;"><table style="border-collapse:collapse;width:100%;font-size:0.85em;">
-    <thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>"""
-
-
-def render_pilar_summary_table_html(summary: pd.DataFrame) -> str:
-    if summary.empty:
-        return "<i>Tidak ada data.</i>"
-    rows = ""
-    total = summary["Omset"].sum()
-    for _, r in summary.iterrows():
-        share = (r["Omset"] / total) if total else 0
-        rows += f"""<tr>
-        <td style="padding:6px 10px;border:1px solid #d1d5db;font-weight:600;">{_pilar_label(r['Pilar'])}</td>
-        <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_rupiah(r['Omset'])}</td>
-        <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_percent(share)}</td>
-        <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_number(r['Qty']) if r['Pilar'] in _PILAR_SHOW_QTY else '-'}</td>
-        <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_rupiah(r['GrossProfit'])}</td>
+def render_pilar_table_html(g: pd.DataFrame) -> str:
+    if g.empty:
+        return "<i>Tidak ada data 6 Pilar untuk periode ini.</i>"
+    rows_html = ""
+    for _, r in g.iterrows():
+        rows_html += f"""<tr>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;">{PILAR_ICONS.get(r['Pilar'],'')} {_pilar_label(r['Pilar'])}</td>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_rupiah(r['Omset'])}</td>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_number(r['Qty']) if r['Pilar'] in _PILAR_SHOW_QTY else '-'}</td>
         </tr>"""
-    return f"""<table style="border-collapse:collapse;width:100%;font-size:0.9em;">
-    <thead><tr style="background:#111827;color:white;">
-        <th style="padding:6px 10px;border:1px solid #d1d5db;text-align:left;">Pilar</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Omset</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">% Kontribusi</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Qty</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Gross Profit</th>
-    </tr></thead><tbody>{rows}</tbody></table>"""
+    return f"""
+    <table style="border-collapse:collapse;width:100%;font-size:0.9em;">
+        <thead><tr style="background:#f0fdfa;">
+            <th style="padding:6px 10px;border:1px solid #d1d5db;text-align:left;">Pilar</th>
+            <th style="padding:6px 10px;border:1px solid #d1d5db;">Omset</th>
+            <th style="padding:6px 10px;border:1px solid #d1d5db;">Qty</th>
+        </tr></thead>
+        <tbody>{rows_html}</tbody>
+    </table>
+    """
 
 
-# ========================= Kontribusi Marketing Corporate vs Sales Retail =========================
+def render_pilar_summary_table_html(g_branch: pd.DataFrame) -> str:
+    if g_branch.empty:
+        return "<i>Tidak ada data.</i>"
+    pivot = g_branch.pivot_table(index="Cabang", columns="Pilar", values="Omset", aggfunc="sum", fill_value=0)
+    pivot = pivot.reindex(columns=[p for p in PILAR_ORDER if p in pivot.columns])
+    header = "".join(f'<th style="padding:5px 8px;border:1px solid #d1d5db;">{_pilar_label(p)}</th>' for p in pivot.columns)
+    rows_html = ""
+    for cabang in order_branches(list(pivot.index)):
+        if cabang not in pivot.index:
+            continue
+        row = pivot.loc[cabang]
+        cells = "".join(f'<td style="padding:5px 8px;border:1px solid #d1d5db;text-align:right;">{format_rupiah(v)}</td>' for v in row)
+        rows_html += f'<tr><td style="padding:5px 8px;border:1px solid #d1d5db;font-weight:600;">{cabang}</td>{cells}</tr>'
+    return f"""
+    <table style="border-collapse:collapse;width:100%;font-size:0.82em;">
+        <thead><tr style="background:#f0fdfa;"><th style="padding:5px 8px;border:1px solid #d1d5db;text-align:left;">Cabang</th>{header}</tr></thead>
+        <tbody>{rows_html}</tbody>
+    </table>
+    """
 
-_MC_CATEGORY_ORDER = ["All", "Service", "Gadget & Aksesoris"]
-_MC_CATEGORY_LABELS = {"All": "Omset All", "Service": "Omset Service", "Gadget & Aksesoris": "Penjualan Gadget & Aksesoris"}
-_MC_CATEGORY_ICONS = {"All": "💰", "Service": "🛠️", "Gadget & Aksesoris": "📱"}
-_MC_CATEGORY_COLORS = {"All": "#1d4ed8", "Service": "#0f766e", "Gadget & Aksesoris": "#6d28d9"}
+
+# ========================= Kontribusi Marketing Corporate vs Sales Retail ==========================
+
+_MC_CATEGORY_ORDER = ["Marketing Corporate", "Sales Retail"]
+_MC_CATEGORY_LABELS = {"Marketing Corporate": "Marketing Corporate", "Sales Retail": "Sales Retail"}
+_MC_CATEGORY_ICONS = {"Marketing Corporate": "🤝", "Sales Retail": "🏪"}
+_MC_CATEGORY_COLORS = {"Marketing Corporate": "#7c3aed", "Sales Retail": "#0f766e"}
 
 
-def _mc_filter_bulan_berjalan(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    if df is None or df.empty or tanggal_acuan is None:
+def _mc_filter_bulan_berjalan(df_main: pd.DataFrame, tanggal_acuan: date) -> pd.DataFrame:
+    if df_main is None or df_main.empty or tanggal_acuan is None:
         return pd.DataFrame()
-    d = df[(df["Tahun"] == tanggal_acuan.year) & (df["Bulan"] == tanggal_acuan.month) &
-           (df["Tanggal"].apply(lambda x: x.day) <= tanggal_acuan.day)]
+    start = date(tanggal_acuan.year, tanggal_acuan.month, 1)
+    return df_main[(df_main["Tanggal"] >= start) & (df_main["Tanggal"] <= tanggal_acuan)]
+
+
+def build_mc_contribution_summary(df_main: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    cols = ["Kelompok", "Omset"]
+    if df_main is None or df_main.empty or "PenjualKelompok" not in df_main.columns:
+        return pd.DataFrame(columns=cols)
+    start, end, *_ = _quarter_bounds(tanggal_acuan)
+    d = df_main[(df_main["Tanggal"] >= start) & (df_main["Tanggal"] <= tanggal_acuan)]
     if selected_branches:
         d = d[d["Cabang"].isin(selected_branches)]
-    return d
-
-
-def build_mc_contribution_summary(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    d = _mc_filter_bulan_berjalan(df, tanggal_acuan, selected_branches)
-    rows = []
-    for kat in _MC_CATEGORY_ORDER:
-        sub = d if kat == "All" else d[d["Kelompok"] == kat] if not d.empty else d
-        total = float(sub["TotalHarga"].sum()) if not sub.empty else 0.0
-        mc = float(sub[sub["KelompokPenjual"] == _MC_LABEL]["TotalHarga"].sum()) if not sub.empty else 0.0
-        retail = total - mc
-        pct_mc = (mc / total) if total else 0.0
-        rows.append({"Kategori": kat, "OmsetTotal": total, "OmsetMC": mc, "OmsetRetail": retail, "PctMC": pct_mc})
-    return pd.DataFrame(rows)
-
-
-def build_mc_person_table(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    d = _mc_filter_bulan_berjalan(df, tanggal_acuan, selected_branches)
     if d.empty:
-        return pd.DataFrame(columns=["Penjual", "Service", "Gadget & Aksesoris", "Total"])
-    d = d[d["KelompokPenjual"] == _MC_LABEL]
+        return pd.DataFrame(columns=cols)
+    g = d.groupby("PenjualKelompok")["Omset"].sum().reset_index()
+    g.columns = ["Kelompok", "Omset"]
+    return g
+
+
+def build_mc_person_table(df_main: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    cols = ["NamaPenjual", "Cabang", "Omset"]
+    if df_main is None or df_main.empty or "PenjualKelompok" not in df_main.columns:
+        return pd.DataFrame(columns=cols)
+    start, end, *_ = _quarter_bounds(tanggal_acuan)
+    d = df_main[(df_main["Tanggal"] >= start) & (df_main["Tanggal"] <= tanggal_acuan) & (df_main["PenjualKelompok"] == "Marketing Corporate")]
+    if selected_branches:
+        d = d[d["Cabang"].isin(selected_branches)]
+    if d.empty or "NamaPenjual" not in d.columns:
+        return pd.DataFrame(columns=cols)
+    g = d.groupby(["NamaPenjual", "Cabang"])["Omset"].sum().reset_index()
+    return g.sort_values("Omset", ascending=False)
+
+
+def build_retail_by_branch(df_main: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
+    cols = ["Cabang", "Omset"]
+    if df_main is None or df_main.empty or "PenjualKelompok" not in df_main.columns:
+        return pd.DataFrame(columns=cols)
+    start, end, *_ = _quarter_bounds(tanggal_acuan)
+    d = df_main[(df_main["Tanggal"] >= start) & (df_main["Tanggal"] <= tanggal_acuan) & (df_main["PenjualKelompok"] == "Sales Retail")]
+    if selected_branches:
+        d = d[d["Cabang"].isin(selected_branches)]
     if d.empty:
-        return pd.DataFrame(columns=["Penjual", "Service", "Gadget & Aksesoris", "Total"])
-    piv = d.pivot_table(index="Penjual", columns="Kelompok", values="TotalHarga", aggfunc="sum", fill_value=0)
-    for c in ["Service", "Gadget & Aksesoris"]:
-        if c not in piv.columns:
-            piv[c] = 0
-    piv = piv[["Service", "Gadget & Aksesoris"]]
-    piv["Total"] = piv.sum(axis=1)
-    piv = piv.sort_values("Total", ascending=False).reset_index()
-    total_row = pd.DataFrame([{
-        "Penjual": "TOTAL", "Service": piv["Service"].sum(),
-        "Gadget & Aksesoris": piv["Gadget & Aksesoris"].sum(), "Total": piv["Total"].sum(),
-    }])
-    return pd.concat([piv, total_row], ignore_index=True)
+        return pd.DataFrame(columns=cols)
+    g = d.groupby("Cabang")["Omset"].sum().reset_index()
+    return g
 
 
-def build_retail_by_branch(df: pd.DataFrame, tanggal_acuan: date, selected_branches=None) -> pd.DataFrame:
-    d = _mc_filter_bulan_berjalan(df, tanggal_acuan, selected_branches)
-    if d.empty:
-        return pd.DataFrame(columns=["Cabang", "Service", "Gadget & Aksesoris", "Total"])
-    d = d[d["KelompokPenjual"] == _RETAIL_LABEL]
-    if d.empty:
-        return pd.DataFrame(columns=["Cabang", "Service", "Gadget & Aksesoris", "Total"])
-    piv = d.pivot_table(index="Cabang", columns="Kelompok", values="TotalHarga", aggfunc="sum", fill_value=0)
-    for c in ["Service", "Gadget & Aksesoris"]:
-        if c not in piv.columns:
-            piv[c] = 0
-    piv = piv[["Service", "Gadget & Aksesoris"]]
-    piv["Total"] = piv.sum(axis=1)
-    branches_present = order_branches(piv.index.tolist())
-    piv = piv.reindex(branches_present).fillna(0).reset_index()
-    total_row = pd.DataFrame([{
-        "Cabang": "TOTAL", "Service": piv["Service"].sum(),
-        "Gadget & Aksesoris": piv["Gadget & Aksesoris"].sum(), "Total": piv["Total"].sum(),
-    }])
-    return pd.concat([piv, total_row], ignore_index=True)
+def render_mc_contribution_card(kelompok: str, omset: float, total: float) -> str:
+    icon = _MC_CATEGORY_ICONS.get(kelompok, "📊")
+    color = _MC_CATEGORY_COLORS.get(kelompok, "#374151")
+    share = (omset / total) if total else 0.0
+    return f"""
+    <div style="border:2px solid {color};border-radius:10px;padding:12px 16px;text-align:center;background:white;">
+        <div style="font-size:1.8em;">{icon}</div>
+        <div style="font-size:0.9em;font-weight:700;color:{color};margin:4px 0;">{_MC_CATEGORY_LABELS.get(kelompok, kelompok)}</div>
+        <div style="font-size:1.2em;font-weight:800;color:#111827;">{format_rupiah(omset)}</div>
+        <div style="font-size:0.85em;color:#6b7280;">{format_percent(share)} dari total</div>
+    </div>
+    """
 
 
-def render_mc_contribution_card(kat: str, row):
-    icon = _MC_CATEGORY_ICONS.get(kat, "")
-    color = _MC_CATEGORY_COLORS.get(kat, "#111827")
-    label = _MC_CATEGORY_LABELS.get(kat, kat)
-    render_kpi_card_text(f"Kontribusi MC — {label}", format_rupiah(row["OmsetMC"]), color, icon,
-                          sub=f"{format_percent(row['PctMC'])} dari {format_rupiah(row['OmsetTotal'])}")
+def render_mc_split_donut(g: pd.DataFrame):
+    if g.empty:
+        return None
+    labels = [_MC_CATEGORY_LABELS.get(k, k) for k in g["Kelompok"]]
+    colors_list = [_MC_CATEGORY_COLORS.get(k, "#9ca3af") for k in g["Kelompok"]]
+    fig = go.Figure(data=[go.Pie(labels=labels, values=g["Omset"], marker=dict(colors=colors_list), hole=0.5)])
+    fig.update_layout(height=300, margin=dict(t=20, b=10, l=10, r=10))
+    return fig
 
 
-def render_mc_split_donut(row, key):
-    fig = go.Figure(go.Pie(labels=["Marketing Corporate", "Sales Retail"],
-                            values=[row["OmsetMC"], row["OmsetRetail"]],
-                            hole=0.5, marker=dict(colors=["#1d4ed8", "#9ca3af"])))
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=260)
-    st.plotly_chart(fig, use_container_width=True, key=key)
-
-
-def render_mc_person_table_html(mc_person: pd.DataFrame) -> str:
-    if mc_person.empty:
-        return "<i>Belum ada kontribusi Marketing Corporate pada periode ini.</i>"
-    rows = ""
-    for _, r in mc_person.iterrows():
-        is_total = r["Penjual"] == "TOTAL"
-        bg = "#f3f4f6" if is_total else "white"
-        fw = "800" if is_total else "500"
-        rows += f"""<tr style="background:{bg};">
-        <td style="padding:5px 10px;border:1px solid #d1d5db;font-weight:{fw};">{r['Penjual']}</td>
-        <td style="padding:5px 10px;border:1px solid #d1d5db;text-align:right;font-weight:{fw};">{format_rupiah(r['Service'])}</td>
-        <td style="padding:5px 10px;border:1px solid #d1d5db;text-align:right;font-weight:{fw};">{format_rupiah(r['Gadget & Aksesoris'])}</td>
-        <td style="padding:5px 10px;border:1px solid #d1d5db;text-align:right;font-weight:{fw};">{format_rupiah(r['Total'])}</td>
+def render_mc_person_table_html(g: pd.DataFrame) -> str:
+    if g.empty:
+        return "<i>Tidak ada data Marketing Corporate untuk periode ini.</i>"
+    rows_html = ""
+    for _, r in g.iterrows():
+        rows_html += f"""<tr>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;">{r['NamaPenjual']}</td>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;">{r['Cabang']}</td>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_rupiah(r['Omset'])}</td>
         </tr>"""
-    return f"""<table style="border-collapse:collapse;width:100%;font-size:0.88em;">
-    <thead><tr style="background:#1d4ed8;color:white;">
-        <th style="padding:6px 10px;border:1px solid #d1d5db;text-align:left;">Nama (Marketing Corporate)</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Service</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Gadget & Aksesoris</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Total</th>
-    </tr></thead><tbody>{rows}</tbody></table>"""
+    return f"""
+    <table style="border-collapse:collapse;width:100%;font-size:0.9em;">
+        <thead><tr style="background:#f5f3ff;">
+            <th style="padding:6px 10px;border:1px solid #d1d5db;text-align:left;">Nama Marketing</th>
+            <th style="padding:6px 10px;border:1px solid #d1d5db;text-align:left;">Cabang</th>
+            <th style="padding:6px 10px;border:1px solid #d1d5db;">Omset</th>
+        </tr></thead>
+        <tbody>{rows_html}</tbody>
+    </table>
+    """
 
 
-def render_retail_by_branch_table_html(retail_by_branch: pd.DataFrame) -> str:
-    if retail_by_branch.empty:
-        return "<i>Belum ada kontribusi Sales Retail pada periode ini.</i>"
-    non_total = retail_by_branch[retail_by_branch["Cabang"] != "TOTAL"]
-    avg_service = non_total["Service"].mean() if not non_total.empty else 0
-    avg_gadget = non_total["Gadget & Aksesoris"].mean() if not non_total.empty else 0
-    rows = ""
-    for _, r in retail_by_branch.iterrows():
-        is_total = r["Cabang"] == "TOTAL"
-        bg = "#f3f4f6" if is_total else "white"
-        fw = "800" if is_total else "500"
-        svc_color = "#111827" if is_total else ("#16a34a" if r["Service"] >= avg_service else "#dc2626")
-        gdg_color = "#111827" if is_total else ("#16a34a" if r["Gadget & Aksesoris"] >= avg_gadget else "#dc2626")
-        rows += f"""<tr style="background:{bg};">
-        <td style="padding:5px 10px;border:1px solid #d1d5db;font-weight:{fw};">{r['Cabang']}</td>
-        <td style="padding:5px 10px;border:1px solid #d1d5db;text-align:right;font-weight:{fw};color:{svc_color};">{format_rupiah(r['Service'])}</td>
-        <td style="padding:5px 10px;border:1px solid #d1d5db;text-align:right;font-weight:{fw};color:{gdg_color};">{format_rupiah(r['Gadget & Aksesoris'])}</td>
-        <td style="padding:5px 10px;border:1px solid #d1d5db;text-align:right;font-weight:{fw};">{format_rupiah(r['Total'])}</td>
+def render_retail_by_branch_table_html(g: pd.DataFrame) -> str:
+    if g.empty:
+        return "<i>Tidak ada data Sales Retail untuk periode ini.</i>"
+    rows_html = ""
+    for _, r in g.iterrows():
+        rows_html += f"""<tr>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;font-weight:600;">{r['Cabang']}</td>
+            <td style="padding:6px 10px;border:1px solid #d1d5db;text-align:right;">{format_rupiah(r['Omset'])}</td>
         </tr>"""
-    return f"""<div style="border:2px solid #b45309;border-radius:10px;overflow:hidden;">
-    <div style="background:#b45309;color:white;padding:8px 12px;font-weight:700;">🏬 Kontribusi Sales Retail per Cabang</div>
-    <table style="border-collapse:collapse;width:100%;font-size:0.88em;">
-    <thead><tr style="background:#fef3c7;">
-        <th style="padding:6px 10px;border:1px solid #d1d5db;text-align:left;">Cabang</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Service</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Gadget & Aksesoris</th>
-        <th style="padding:6px 10px;border:1px solid #d1d5db;">Total</th>
-    </tr></thead><tbody>{rows}</tbody></table></div>"""
+    return f"""
+    <table style="border-collapse:collapse;width:100%;font-size:0.9em;">
+        <thead><tr style="background:#f0fdfa;">
+            <th style="padding:6px 10px;border:1px solid #d1d5db;text-align:left;">Cabang</th>
+            <th style="padding:6px 10px;border:1px solid #d1d5db;">Omset Retail</th>
+        </tr></thead>
+        <tbody>{rows_html}</tbody>
+    </table>
+    """
 
 
 _MC_MARKETING_ACTION_PLAN = {
-    "online": ["Follow-up leads corporate via email/WA blast mingguan", "Konten studi kasus kerja sama korporat"],
-    "offline": ["Kunjungan langsung ke kantor/perusahaan sekitar cabang", "Ikuti pameran/expo bisnis lokal"],
+    "online": ["Follow-up leads corporate via WhatsApp Business/LinkedIn", "Email penawaran kerja sama ke database corporate lama"],
+    "offline": ["Kunjungan langsung ke kantor/instansi calon klien corporate", "Ikuti pameran/expo B2B di area cabang"],
 }
 
 
-def generate_mc_insights(mc_summary: pd.DataFrame, mc_person: pd.DataFrame) -> list:
+def generate_mc_insights(g_summary: pd.DataFrame) -> list:
     insights = []
-    if mc_summary.empty:
+    if g_summary.empty:
         return insights
-    row_all = mc_summary[mc_summary["Kategori"] == "All"]
-    if not row_all.empty and float(row_all.iloc[0]["PctMC"]) < 0.05 and float(row_all.iloc[0]["OmsetTotal"]) > 0:
-        insights.append({
-            "level": "warn", "category": "Marketing Corporate",
-            "title": f"Kontribusi Marketing Corporate masih kecil ({format_percent(row_all.iloc[0]['PctMC'])})",
-            "problem": f"Dari total Omset All {format_rupiah(row_all.iloc[0]['OmsetTotal'])}, MC baru menyumbang {format_rupiah(row_all.iloc[0]['OmsetMC'])}.",
-            "online": _MC_MARKETING_ACTION_PLAN["online"], "offline": _MC_MARKETING_ACTION_PLAN["offline"],
-        })
-    return insights
-
-
-def generate_retail_branch_insights(retail_by_branch: pd.DataFrame) -> list:
-    insights = []
-    if retail_by_branch.empty:
+    total = g_summary["Omset"].sum()
+    if total <= 0:
         return insights
-    d = retail_by_branch[retail_by_branch["Cabang"] != "TOTAL"]
-    if d.empty:
-        return insights
-    for kat_col in ["Service", "Gadget & Aksesoris"]:
-        avg = d[kat_col].mean()
-        if avg <= 0:
-            continue
-        top = d.loc[d[kat_col].idxmax()]
-        insights.append({
-            "level": "good", "category": kat_col,
-            "title": f"{top['Cabang']}: Retail terbaik di kategori {kat_col}",
-            "problem": f"Kontribusi {format_rupiah(top[kat_col])}, di atas rata-rata cabang ({format_rupiah(avg)}).",
-            "online": [], "offline": [],
-        })
-        plan = _CATEGORY_ACTION_PLANS.get(kat_col, {"online": [], "offline": []})
-        for _, r in d[d[kat_col] < 0.6 * avg].iterrows():
+    mc_row = g_summary[g_summary["Kelompok"] == "Marketing Corporate"]
+    if not mc_row.empty:
+        share = mc_row.iloc[0]["Omset"] / total
+        if share < 0.1:
             insights.append({
-                "level": "bad", "category": kat_col,
-                "title": f"{r['Cabang']}: Retail {kat_col} di bawah rata-rata",
-                "problem": f"Kontribusi hanya {format_rupiah(r[kat_col])}, jauh di bawah rata-rata cabang ({format_rupiah(avg)}).",
-                "online": plan["online"], "offline": plan["offline"],
+                "level": "warn", "category": "Marketing Corporate",
+                "title": f"Kontribusi Marketing Corporate masih rendah ({format_percent(share)})",
+                "problem": f"Omset Corporate {format_rupiah(mc_row.iloc[0]['Omset'])} dari total {format_rupiah(total)}.",
+                "online": _MC_MARKETING_ACTION_PLAN["online"], "offline": _MC_MARKETING_ACTION_PLAN["offline"],
             })
     return insights
 
 
-# ========================= Ledger Riwayat Harian =========================
+def generate_retail_branch_insights(g_retail: pd.DataFrame) -> list:
+    insights = []
+    if g_retail.empty:
+        return insights
+    avg = g_retail["Omset"].mean()
+    if avg <= 0:
+        return insights
+    for _, r in g_retail.iterrows():
+        if r["Omset"] < 0.7 * avg:
+            insights.append({
+                "level": "bad", "category": r["Cabang"],
+                "title": f"{r['Cabang']}: Omset Retail jauh di bawah rata-rata cabang",
+                "problem": f"Omset {format_rupiah(r['Omset'])}, rata-rata cabang lain {format_rupiah(avg)}.",
+                "online": ["Tingkatkan promosi lokal & konten media sosial cabang"],
+                "offline": ["Evaluasi layanan pelanggan & display produk toko"],
+            })
+    return insights
 
-_HISTORY_LOG_COLUMNS = ["Tanggal", "Tahun", "Bulan", "Cabang", "Kelompok", "OmsetHarian"]
-_LOG_PATH = os.path.join(LOG_DIR, "omset_harian_log.csv")
+
+# ========================= Ledger (Riwayat Upload) ==========================
+
+_HISTORY_LOG_COLUMNS = ["Tanggal", "Cabang", "Kategori", "Omset", "Timestamp"]
+_LOG_PATH = os.path.join(DATA_DIR, "log", "upload_log.csv")
 
 
 def _read_log() -> pd.DataFrame:
     if not os.path.exists(_LOG_PATH):
         return pd.DataFrame(columns=_HISTORY_LOG_COLUMNS)
     try:
-        d = pd.read_csv(_LOG_PATH, parse_dates=["Tanggal"])
-        d["Tanggal"] = d["Tanggal"].dt.date
-        return d
+        df = pd.read_csv(_LOG_PATH)
+        if "Tanggal" in df.columns:
+            df["Tanggal"] = pd.to_datetime(df["Tanggal"]).dt.date
+        return df
     except Exception:
         return pd.DataFrame(columns=_HISTORY_LOG_COLUMNS)
 
 
-def _upsert_log(new_rows: pd.DataFrame):
-    if new_rows is None or new_rows.empty:
-        return
-    os.makedirs(LOG_DIR, exist_ok=True)
-    existing = _read_log()
-    combined = pd.concat([existing, new_rows], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["Tanggal", "Cabang", "Kelompok"], keep="last")
-    combined.to_csv(_LOG_PATH, index=False)
-    if _GH_ENABLED:
-        try:
-            with open(_LOG_PATH, "rb") as f:
-                github_upload_file("data/log/omset_harian_log.csv", f.read(), "update ledger")
-        except Exception:
-            pass
-
-
-def build_upload_log(df_main: pd.DataFrame):
+def _upsert_log(df_main: pd.DataFrame):
     if df_main is None or df_main.empty:
         return
-    g_all = df_main.groupby(["Cabang", "Tanggal"])["TotalHarga"].sum().reset_index()
-    g_all["Kelompok"] = "Omset All"
-    g_kat = df_main.groupby(["Cabang", "Tanggal", "Kelompok"])["TotalHarga"].sum().reset_index()
-    g = pd.concat([g_all.rename(columns={"TotalHarga": "OmsetHarian"}),
-                    g_kat.rename(columns={"TotalHarga": "OmsetHarian"})], ignore_index=True)
-    g["Tahun"] = g["Tanggal"].apply(lambda d: d.year)
-    g["Bulan"] = g["Tanggal"].apply(lambda d: d.month)
-    _upsert_log(g[_HISTORY_LOG_COLUMNS])
+    os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+    g = df_main.groupby(["Tanggal", "Cabang", "Kategori"])["Omset"].sum().reset_index()
+    g["Timestamp"] = datetime.now().isoformat()
+    g.to_csv(_LOG_PATH, index=False)
+    try:
+        if _GH_ENABLED:
+            github_upload_file(f"data/log/{os.path.basename(_LOG_PATH)}", open(_LOG_PATH, "rb").read())
+    except Exception:
+        pass
 
 
-def build_corp_upload_log(*args, **kwargs):
-    pass
+def build_upload_log(df_main: pd.DataFrame) -> pd.DataFrame:
+    _upsert_log(df_main)
+    return _read_log()
 
 
-def compute_corp_hari_ini(*args, **kwargs):
-    return 0.0
+def build_corp_upload_log(df_corp: pd.DataFrame) -> pd.DataFrame:
+    """Stub: log riwayat upload corporate (belum ada kebutuhan spesifik)."""
+    return pd.DataFrame()
 
 
-# ========================= Export Laporan Lengkap (PPTX & PDF) =========================
+def compute_corp_hari_ini(df_corp: pd.DataFrame, tanggal_acuan: date) -> float:
+    """Stub fallback: pakai total omset corporate manual dibagi hari berjalan bulan ini."""
+    if df_corp is None or df_corp.empty or "Omset Corporate" not in df_corp.columns:
+        return 0.0
+    total = float(df_corp["Omset Corporate"].sum())
+    if tanggal_acuan is None:
+        return total
+    days_in_month = tanggal_acuan.day
+    return total / days_in_month if days_in_month else total
 
-def _pptx_add_title_slide(prs, title, subtitle=""):
+
+# ========================= PPTX / PDF Full Report Export ==========================
+
+def _pptx_add_title_slide(prs, title: str, subtitle: str = ""):
     slide = prs.slides.add_slide(prs.slide_layouts[0])
     slide.shapes.title.text = title
-    if subtitle and len(slide.placeholders) > 1:
+    if len(slide.placeholders) > 1:
         slide.placeholders[1].text = subtitle
     return slide
 
 
-def _pptx_add_table_slide(prs, title, df: pd.DataFrame, money_cols=None):
+def _pptx_add_table_slide(prs, title: str, df: pd.DataFrame, fmt_fn=None):
     slide = prs.slides.add_slide(prs.slide_layouts[5])
     slide.shapes.title.text = title
-    if df.empty:
+    if df is None or df.empty:
+        tx = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(9), Inches(1))
+        tx.text_frame.text = "Tidak ada data."
         return slide
-    money_cols = money_cols or []
     rows, cols = df.shape[0] + 1, df.shape[1]
-    left, top, width, height = Inches(0.4), Inches(1.4), Inches(9.2), Inches(0.35 * min(rows, 14))
-    table_shape = slide.shapes.add_table(min(rows, 15), cols, left, top, width, height)
+    left, top, width, height = Inches(0.4), Inches(1.3), Inches(9.2), Inches(0.35 * (rows + 1))
+    table_shape = slide.shapes.add_table(rows, cols, left, top, width, height)
     table = table_shape.table
     for j, col in enumerate(df.columns):
         table.cell(0, j).text = str(col)
-    for i, (_, r) in enumerate(df.head(14).iterrows(), start=1):
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
         for j, col in enumerate(df.columns):
-            v = r[col]
-            table.cell(i, j).text = format_rupiah(v) if col in money_cols else str(v)
+            val = r[col]
+            txt = fmt_fn(col, val) if fmt_fn else str(val)
+            table.cell(i, j).text = txt
     return slide
 
 
-def _build_report_sections(df_main, scoreboards: dict, periode_label: str):
-    return scoreboards
+def _build_report_sections(df_main, sb_dict, walkin_df, pilar_summary, mc_summary):
+    sections = []
+    sections.append(("Scoreboard Omset All", sb_dict.get("Omset All", pd.DataFrame())))
+    sections.append(("Scoreboard Service", sb_dict.get("Service", pd.DataFrame())))
+    sections.append(("Scoreboard Gadget & Aksesoris", sb_dict.get("Gadget & Aksesoris", pd.DataFrame())))
+    sections.append(("Walk-in per Cabang", walkin_df))
+    sections.append(("6 Pilar MFlash", pilar_summary))
+    sections.append(("Kontribusi Marketing Corporate vs Retail", mc_summary))
+    return sections
 
 
-def generate_pptx_report(df_main, scoreboards: dict, periode_label: str) -> bytes:
+def generate_pptx_report(df_main, sb_dict, walkin_df, pilar_summary, mc_summary, periode_label=""):
     prs = Presentation()
-    _pptx_add_title_slide(prs, "Laporan Omset MFlash", periode_label)
-    for title, df_score in scoreboards.items():
-        _pptx_add_table_slide(prs, title, df_score, money_cols=[c for c, _ in _SCOREBOARD_COL_ORDER if c in MONEY_COLS])
+    _pptx_add_title_slide(prs, "Laporan Dashboard Omset MFlash", periode_label)
+    sections = _build_report_sections(df_main, sb_dict, walkin_df, pilar_summary, mc_summary)
+    for title, df in sections:
+        _pptx_add_table_slide(prs, title, df, fmt_fn=lambda c, v: _fmt_scoreboard_cell(c, v) if c in _SCOREBOARD_COL_ORDER else (
+            format_rupiah(v) if isinstance(v, (int, float)) else str(v)))
     buf = io.BytesIO()
     prs.save(buf)
     buf.seek(0)
     return buf.read()
 
 
-def generate_pdf_report(df_main, scoreboards: dict, periode_label: str) -> bytes:
-    return generate_scoreboard_pdf(scoreboards, periode_label)
+def generate_pdf_report(df_main, sb_dict, walkin_df, pilar_summary, mc_summary, periode_label=""):
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), topMargin=1 * cm, bottomMargin=1 * cm,
+                             leftMargin=1 * cm, rightMargin=1 * cm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("title", parent=styles["Title"], fontSize=16, textColor=rl_colors.HexColor("#0f766e"))
+    sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, textColor=rl_colors.HexColor("#374151"))
+    elements = [Paragraph("Laporan Dashboard Omset MFlash", title_style), Paragraph(periode_label, sub_style), Spacer(1, 14)]
+
+    sections = _build_report_sections(df_main, sb_dict, walkin_df, pilar_summary, mc_summary)
+    for title, df in sections:
+        elements.append(Paragraph(title, ParagraphStyle("h2", parent=styles["Heading2"], textColor=rl_colors.HexColor("#0f766e"))))
+        elements.append(Spacer(1, 6))
+        if df is None or df.empty:
+            elements.append(Paragraph("Tidak ada data.", styles["Normal"]))
+        else:
+            data = [list(df.columns)]
+            for _, r in df.iterrows():
+                row = []
+                for c in df.columns:
+                    v = r[c]
+                    if c in _SCOREBOARD_COL_ORDER:
+                        row.append(_fmt_scoreboard_cell(c, v))
+                    elif isinstance(v, (int, float)):
+                        row.append(format_rupiah(v) if abs(v) > 1000 else format_number(v))
+                    else:
+                        row.append(str(v))
+                data.append(row)
+            table = Table(data, repeatRows=1)
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#0f766e")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.HexColor("#d1d5db")),
+                ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+                ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+            ]))
+            elements.append(table)
+        elements.append(Spacer(1, 16))
+    doc.build(elements)
+    buf.seek(0)
+    return buf.read()
 
 
 # ========================= UI ==========================
@@ -2226,511 +2195,499 @@ def generate_pdf_report(df_main, scoreboards: dict, periode_label: str) -> bytes
 for _d in [MAIN_DATA_DIR, ADS_DATA_DIR, WALKIN_DATA_DIR, TARGET_DATA_DIR, CORP_DATA_DIR, LOG_DIR]:
     os.makedirs(_d, exist_ok=True)
 
-if _GH_ENABLED and not st.session_state.get("_gh_synced_v1"):
-    sync_data_from_github()
-    st.session_state["_gh_synced_v1"] = True
-
-if not st.session_state.get("_main_deduped_v1"):
-    _dedupe_main_files()
-    st.session_state["_main_deduped_v1"] = True
-
-_logo_col1, _logo_col2 = st.columns([1, 6])
-with _logo_col1:
+if _GH_ENABLED and not st.session_state.get("_gh_synced"):
     try:
-        st.image(base64.b64decode(LOGO_BASE64), width=90)
+        sync_data_from_github()
     except Exception:
         pass
-with _logo_col2:
-    st.markdown("## 📊 Dashboard Omset MFlash")
-    st.caption("Omset • Iklan • Walk-in • 6 Pilar MFlash • Kontribusi Marketing Corporate")
+    st.session_state["_gh_synced"] = True
 
-# ---- Sidebar uploads ----
+_dedupe_main_files()
+
+st.markdown(
+    f"""
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:10px;">
+        <img src="data:image/png;base64,{LOGO_BASE64}" style="height:64px;" />
+        <div>
+            <div style="font-size:1.5em;font-weight:800;color:#0f766e;">Dashboard Omset MFlash</div>
+            <div style="font-size:0.9em;color:#6b7280;">Monitoring Omset, Iklan, Walk-in, 6 Pilar &amp; Kontribusi Marketing</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 with st.sidebar:
-    st.markdown("### 📁 Upload Data")
+    st.header("📁 Upload Data")
 
-    with st.expander("💰 Data Omset (Faktur Penjualan)", expanded=False):
-        up_main = st.file_uploader("Upload file Omset (.xlsx)", type=["xlsx", "xls"],
-                                    accept_multiple_files=True, key="up_main")
+    with st.expander("📊 Data Omset (Faktur Penjualan)", expanded=False):
+        up_main = st.file_uploader("Upload file Excel Omset", type=["xlsx", "xls"], accept_multiple_files=True, key="up_main")
         if up_main:
             for f in up_main:
-                fpath = os.path.join(MAIN_DATA_DIR, sanitize_filename(f.name))
-                with open(fpath, "wb") as out:
+                dest = os.path.join(MAIN_DATA_DIR, f.name)
+                with open(dest, "wb") as out:
                     out.write(f.getbuffer())
                 if _GH_ENABLED:
-                    with open(fpath, "rb") as rf:
-                        github_upload_file(f"data/main/{sanitize_filename(f.name)}", rf.read(), "upload omset")
+                    try:
+                        github_upload_file(f"data/main/{f.name}", f.getbuffer())
+                    except Exception:
+                        pass
             _dedupe_main_files()
-            st.success(f"{len(up_main)} file omset diunggah.")
+            st.success(f"{len(up_main)} file diunggah.")
         existing_main = sorted(os.listdir(MAIN_DATA_DIR)) if os.path.isdir(MAIN_DATA_DIR) else []
-        for fname in existing_main:
+        for fn in existing_main:
             c1, c2 = st.columns([4, 1])
-            c1.caption(fname)
-            if c2.button("🗑️", key=f"del_main_{fname}"):
-                os.remove(os.path.join(MAIN_DATA_DIR, fname))
+            c1.caption(fn)
+            if c2.button("🗑️", key=f"del_main_{fn}"):
+                os.remove(os.path.join(MAIN_DATA_DIR, fn))
                 if _GH_ENABLED:
-                    github_delete_file(f"data/main/{fname}")
+                    try:
+                        github_delete_file(f"data/main/{fn}")
+                    except Exception:
+                        pass
                 st.rerun()
 
     with st.expander("📢 Data Iklan (Meta Ads)", expanded=False):
-        up_ads = st.file_uploader("Upload export Meta Ads (.xlsx)", type=["xlsx", "xls"],
-                                   accept_multiple_files=True, key="up_ads")
+        up_ads = st.file_uploader("Upload file Excel Ads", type=["xlsx", "xls", "csv"], accept_multiple_files=True, key="up_ads")
         if up_ads:
             for f in up_ads:
-                fpath = os.path.join(ADS_DATA_DIR, sanitize_filename(f.name))
-                with open(fpath, "wb") as out:
+                dest = os.path.join(ADS_DATA_DIR, f.name)
+                with open(dest, "wb") as out:
                     out.write(f.getbuffer())
                 if _GH_ENABLED:
-                    with open(fpath, "rb") as rf:
-                        github_upload_file(f"data/ads/{sanitize_filename(f.name)}", rf.read(), "upload ads")
-            st.success(f"{len(up_ads)} file iklan diunggah.")
+                    try:
+                        github_upload_file(f"data/ads/{f.name}", f.getbuffer())
+                    except Exception:
+                        pass
+            st.success(f"{len(up_ads)} file diunggah.")
         existing_ads = sorted(os.listdir(ADS_DATA_DIR)) if os.path.isdir(ADS_DATA_DIR) else []
-        for fname in existing_ads:
+        for fn in existing_ads:
             c1, c2 = st.columns([4, 1])
-            c1.caption(fname)
-            if c2.button("🗑️", key=f"del_ads_{fname}"):
-                os.remove(os.path.join(ADS_DATA_DIR, fname))
+            c1.caption(fn)
+            if c2.button("🗑️", key=f"del_ads_{fn}"):
+                os.remove(os.path.join(ADS_DATA_DIR, fn))
                 if _GH_ENABLED:
-                    github_delete_file(f"data/ads/{fname}")
+                    try:
+                        github_delete_file(f"data/ads/{fn}")
+                    except Exception:
+                        pass
                 st.rerun()
 
     with st.expander("🚶 Data Walk-in", expanded=False):
-        up_walkin = st.file_uploader("Upload rincian pengiriman pesanan (.xlsx)", type=["xlsx", "xls"],
-                                      accept_multiple_files=True, key="up_walkin")
+        up_walkin = st.file_uploader("Upload file Excel Walk-in", type=["xlsx", "xls"], accept_multiple_files=True, key="up_walkin")
         if up_walkin:
             for f in up_walkin:
-                fpath = os.path.join(WALKIN_DATA_DIR, sanitize_filename(f.name))
-                with open(fpath, "wb") as out:
+                dest = os.path.join(WALKIN_DATA_DIR, f.name)
+                with open(dest, "wb") as out:
                     out.write(f.getbuffer())
                 if _GH_ENABLED:
-                    with open(fpath, "rb") as rf:
-                        github_upload_file(f"data/walkin/{sanitize_filename(f.name)}", rf.read(), "upload walkin")
-            st.success(f"{len(up_walkin)} file walk-in diunggah.")
+                    try:
+                        github_upload_file(f"data/walkin/{f.name}", f.getbuffer())
+                    except Exception:
+                        pass
+            st.success(f"{len(up_walkin)} file diunggah.")
         existing_walkin = sorted(os.listdir(WALKIN_DATA_DIR)) if os.path.isdir(WALKIN_DATA_DIR) else []
-        for fname in existing_walkin:
+        for fn in existing_walkin:
             c1, c2 = st.columns([4, 1])
-            c1.caption(fname)
-            if c2.button("🗑️", key=f"del_walkin_{fname}"):
-                os.remove(os.path.join(WALKIN_DATA_DIR, fname))
+            c1.caption(fn)
+            if c2.button("🗑️", key=f"del_walkin_{fn}"):
+                os.remove(os.path.join(WALKIN_DATA_DIR, fn))
                 if _GH_ENABLED:
-                    github_delete_file(f"data/walkin/{fname}")
+                    try:
+                        github_delete_file(f"data/walkin/{fn}")
+                    except Exception:
+                        pass
                 st.rerun()
 
     with st.expander("🎯 Target Omset (opsional)", expanded=False):
-        st.caption("Jika tidak diupload, target akan otomatis dibaca dari sheet 'Scoreboard' pada file Omset di atas (jika ada).")
-        st.download_button("⬇️ Unduh Template Target", data=make_target_template(),
-                            file_name="template_target.xlsx", key="dl_target_template")
-        up_target = st.file_uploader("Upload Target (.xlsx)", type=["xlsx", "xls"], key="up_target")
+        st.download_button("⬇️ Download Template Target", data=make_target_template(),
+                            file_name="template_target.xlsx", key="dl_target_tpl")
+        up_target = st.file_uploader("Upload file Target", type=["xlsx", "xls"], accept_multiple_files=True, key="up_target")
         if up_target:
-            fpath = os.path.join(TARGET_DATA_DIR, sanitize_filename(up_target.name))
-            with open(fpath, "wb") as out:
-                out.write(up_target.getbuffer())
-            if _GH_ENABLED:
-                with open(fpath, "rb") as rf:
-                    github_upload_file(f"data/target/{sanitize_filename(up_target.name)}", rf.read(), "upload target")
-            st.success("File target diunggah.")
-        existing_target = sorted(os.listdir(TARGET_DATA_DIR)) if os.path.isdir(TARGET_DATA_DIR) else []
-        for fname in existing_target:
-            c1, c2 = st.columns([4, 1])
-            c1.caption(fname)
-            if c2.button("🗑️", key=f"del_target_{fname}"):
-                os.remove(os.path.join(TARGET_DATA_DIR, fname))
+            for f in up_target:
+                dest = os.path.join(TARGET_DATA_DIR, f.name)
+                with open(dest, "wb") as out:
+                    out.write(f.getbuffer())
                 if _GH_ENABLED:
-                    github_delete_file(f"data/target/{fname}")
+                    try:
+                        github_upload_file(f"data/target/{f.name}", f.getbuffer())
+                    except Exception:
+                        pass
+            st.success(f"{len(up_target)} file diunggah.")
+        existing_target = sorted(os.listdir(TARGET_DATA_DIR)) if os.path.isdir(TARGET_DATA_DIR) else []
+        for fn in existing_target:
+            c1, c2 = st.columns([4, 1])
+            c1.caption(fn)
+            if c2.button("🗑️", key=f"del_target_{fn}"):
+                os.remove(os.path.join(TARGET_DATA_DIR, fn))
+                if _GH_ENABLED:
+                    try:
+                        github_delete_file(f"data/target/{fn}")
+                    except Exception:
+                        pass
                 st.rerun()
 
-    with st.expander("🤝 Data Corporate (manual, opsional)", expanded=False):
-        st.download_button("⬇️ Unduh Template Corporate", data=make_corporate_template(),
-                            file_name="template_corporate.xlsx", key="dl_corp_template")
-        up_corp = st.file_uploader("Upload Corporate (.xlsx)", type=["xlsx", "xls"], key="up_corp")
+    with st.expander("🤝 Data Corporate (opsional)", expanded=False):
+        st.download_button("⬇️ Download Template Corporate", data=make_corporate_template(),
+                            file_name="template_corporate.xlsx", key="dl_corp_tpl")
+        up_corp = st.file_uploader("Upload file Corporate", type=["xlsx", "xls"], accept_multiple_files=True, key="up_corp")
         if up_corp:
-            fpath = os.path.join(CORP_DATA_DIR, sanitize_filename(up_corp.name))
-            with open(fpath, "wb") as out:
-                out.write(up_corp.getbuffer())
-            if _GH_ENABLED:
-                with open(fpath, "rb") as rf:
-                    github_upload_file(f"data/corp/{sanitize_filename(up_corp.name)}", rf.read(), "upload corp")
-            st.success("File corporate diunggah.")
+            for f in up_corp:
+                dest = os.path.join(CORP_DATA_DIR, f.name)
+                with open(dest, "wb") as out:
+                    out.write(f.getbuffer())
+                if _GH_ENABLED:
+                    try:
+                        github_upload_file(f"data/corp/{f.name}", f.getbuffer())
+                    except Exception:
+                        pass
+            st.success(f"{len(up_corp)} file diunggah.")
+        existing_corp = sorted(os.listdir(CORP_DATA_DIR)) if os.path.isdir(CORP_DATA_DIR) else []
+        for fn in existing_corp:
+            c1, c2 = st.columns([4, 1])
+            c1.caption(fn)
+            if c2.button("🗑️", key=f"del_corp_{fn}"):
+                os.remove(os.path.join(CORP_DATA_DIR, fn))
+                if _GH_ENABLED:
+                    try:
+                        github_delete_file(f"data/corp/{fn}")
+                    except Exception:
+                        pass
+                st.rerun()
 
-
-# ---- Load all data ----
 df_main = load_all_main_data()
 df_ads = load_all_ads_data()
 df_walkin = load_all_walkin_data()
 
-if df_main is not None and not df_main.empty:
-    build_upload_log(df_main)
+target_map = {k: {} for k in SCOREBOARD_KATEGORI}
+target_files = sorted(os.listdir(TARGET_DATA_DIR)) if os.path.isdir(TARGET_DATA_DIR) else []
+if target_files:
+    for fn in target_files:
+        df_t = load_target_data(os.path.join(TARGET_DATA_DIR, fn))
+        if df_t.empty:
+            continue
+        cols_lower = {c.lower(): c for c in df_t.columns}
+        kat_col = cols_lower.get("kategori")
+        cab_col = cols_lower.get("cabang")
+        val_col = None
+        for c in df_t.columns:
+            if "target" in c.lower() and "omset" in c.lower():
+                val_col = c
+                break
+        if kat_col and cab_col and val_col:
+            for _, r in df_t.iterrows():
+                kat = str(r[kat_col]).strip()
+                cab = str(r[cab_col]).strip().upper()
+                if kat in target_map:
+                    try:
+                        target_map[kat][cab] = float(r[val_col])
+                    except (ValueError, TypeError):
+                        pass
+else:
+    main_files = sorted(os.listdir(MAIN_DATA_DIR)) if os.path.isdir(MAIN_DATA_DIR) else []
+    for fn in main_files:
+        fpath = os.path.join(MAIN_DATA_DIR, fn)
+        extracted = extract_scoreboard_target(fpath)
+        for kat, mapping in extracted.items():
+            for cab, val in mapping.items():
+                if cab not in target_map[kat]:
+                    target_map[kat][cab] = val
 
-# ---- Resolve target (dedicated file > auto-extract from Scoreboard sheet) ----
-target_map = {v: {} for v in _SECTION_MARKERS.values()}
-_target_files = [os.path.join(TARGET_DATA_DIR, f) for f in os.listdir(TARGET_DATA_DIR)] if os.path.isdir(TARGET_DATA_DIR) else []
-_target_files = [f for f in _target_files if f.lower().endswith((".xlsx", ".xls"))]
-if _target_files:
-    tdf = load_target_data(_target_files[-1])
-    if not tdf.empty and "Cabang" in tdf.columns:
-        col_map = {
-            "Omset All": "Target Omset All (Kuartal)",
-            "Service": "Target Service (Kuartal)",
-            "Gadget & Aksesoris": "Target Gadget & Aksesoris (Kuartal)",
-        }
-        for kat, col in col_map.items():
-            if col in tdf.columns:
-                for _, r in tdf.iterrows():
-                    cab = str(r["Cabang"]).strip().upper()
-                    val = _to_float_or_none(r[col])
-                    if cab in BRANCH_ORDER and val:
-                        target_map[kat][cab] = val
+df_corp = pd.DataFrame()
+corp_files = sorted(os.listdir(CORP_DATA_DIR)) if os.path.isdir(CORP_DATA_DIR) else []
+if corp_files:
+    frames = [load_corporate_data(os.path.join(CORP_DATA_DIR, fn)) for fn in corp_files]
+    frames = [f for f in frames if not f.empty]
+    if frames:
+        df_corp = pd.concat(frames, ignore_index=True)
 
-_main_files_all = [os.path.join(MAIN_DATA_DIR, f) for f in os.listdir(MAIN_DATA_DIR)] if os.path.isdir(MAIN_DATA_DIR) else []
-_main_files_all = [f for f in _main_files_all if f.lower().endswith((".xlsx", ".xls"))]
-_auto_targets = extract_scoreboard_target(_main_files_all) if _main_files_all else {v: {} for v in _SECTION_MARKERS.values()}
-for kat in target_map:
-    for cab, val in _auto_targets.get(kat, {}).items():
-        target_map[kat].setdefault(cab, val)
+if df_main.empty:
+    st.info("👋 Silakan unggah minimal 1 file Data Omset (Faktur Penjualan) di sidebar untuk mulai menggunakan dashboard.")
 
-_snapshot_date = extract_scoreboard_snapshot_date(_main_files_all) if _main_files_all else None
+default_date = df_main["Tanggal"].max() if not df_main.empty and "Tanggal" in df_main.columns else date.today()
+if pd.isna(default_date):
+    default_date = date.today()
+if isinstance(default_date, pd.Timestamp):
+    default_date = default_date.date()
 
-if df_main is None or df_main.empty:
-    st.info("Belum ada data Omset yang diunggah. Silakan upload file di sidebar untuk mulai memakai dashboard.")
+col_f1, col_f2 = st.columns([1, 2])
+with col_f1:
+    tanggal_acuan = st.date_input("📅 Tanggal Acuan", value=default_date, key="tanggal_acuan")
+with col_f2:
+    all_branches_present = order_branches(df_main["Cabang"].unique()) if not df_main.empty else BRANCH_ORDER
+    selected_branches = st.multiselect("🏢 Filter Cabang", options=all_branches_present, default=all_branches_present, key="selected_branches")
 
-# ---- Filter row ----
-_default_tanggal = _snapshot_date or (df_main["Tanggal"].max() if df_main is not None and not df_main.empty else date.today())
-if isinstance(_default_tanggal, datetime):
-    _default_tanggal = _default_tanggal.date()
+q_start, q_end, q_total_hari, q_hari_berjalan, q_sisa_hari = _quarter_bounds(tanggal_acuan)
+periode_label = f"{BULAN_ID.get(tanggal_acuan.month,'')} {tanggal_acuan.year}"
+quarter_period_label = f"{q_start.day} {BULAN_ID.get(q_start.month,'')[:3]} - {tanggal_acuan.day} {BULAN_ID.get(tanggal_acuan.month,'')[:3]} {tanggal_acuan.year}"
 
-filt_col1, filt_col2 = st.columns([1, 3])
-with filt_col1:
-    tanggal_acuan = st.date_input("📅 Tanggal Acuan", value=_default_tanggal, key="tanggal_acuan")
-with filt_col2:
-    all_branches_present = order_branches(df_main["Cabang"].dropna().unique().tolist()) if df_main is not None and not df_main.empty else BRANCH_ORDER
-    selected_branches = st.multiselect("🏬 Filter Cabang (kosongkan = semua)", options=all_branches_present, default=[], key="branch_filter")
-selected_branches = selected_branches or None
-
-periode_label = f"{BULAN_ID.get(tanggal_acuan.month, '')} {tanggal_acuan.year} (s/d tanggal {tanggal_acuan.day})"
-
-# ---- Build scoreboards for all 3 categories (dipakai di beberapa tab) ----
-scoreboards = {}
+sb_dict = {}
 for kat in SCOREBOARD_KATEGORI:
-    scoreboards[_SCOREBOARD_KATEGORI_LABEL[kat]] = build_scoreboard(df_main, tanggal_acuan, target_map, kat, selected_branches)
+    sb_raw = build_scoreboard(df_main, tanggal_acuan, target_map, kat, selected_branches)
+    sb_dict[kat] = _finalize_scoreboard(sb_raw)
 
-log_df = _read_log()
+walkin_agg_current = aggregate_walkin_current_period(df_walkin, tanggal_acuan, selected_branches) if not df_walkin.empty else pd.DataFrame()
+walkin_agg_monthly = aggregate_walkin_monthly(df_walkin) if not df_walkin.empty else pd.DataFrame()
+
+pilar_summary = build_pilar_summary(df_main, tanggal_acuan, selected_branches)
+pilar_by_branch = build_pilar_by_branch(df_main, tanggal_acuan, selected_branches)
+
+mc_summary = build_mc_contribution_summary(df_main, tanggal_acuan, selected_branches)
+mc_person_table = build_mc_person_table(df_main, tanggal_acuan, selected_branches)
+retail_by_branch = build_retail_by_branch(df_main, tanggal_acuan, selected_branches)
+
+if not df_main.empty:
+    build_upload_log(df_main)
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🏠 Ringkasan", "🏆 Scoreboard", "📢 Iklan", "🚶 Walk-in", "🧩 6 Pilar", "🤝 Kontribusi MC",
 ])
 
-# ========================= TAB 1: RINGKASAN =========================
 with tab1:
-    st.subheader(f"Ringkasan — {periode_label}")
-    sb_all = scoreboards[_SCOREBOARD_KATEGORI_LABEL["Omset All"]]
-    sb_service = scoreboards[_SCOREBOARD_KATEGORI_LABEL["Service"]]
-    sb_gadget = scoreboards[_SCOREBOARD_KATEGORI_LABEL["Gadget & Aksesoris"]]
+    st.subheader(f"🏠 Ringkasan — {periode_label}")
+    if df_main.empty:
+        st.warning("Belum ada data Omset.")
+    else:
+        omset_all_row = sb_dict["Omset All"][sb_dict["Omset All"]["Cabang"] == "TOTAL"]
+        service_row = sb_dict["Service"][sb_dict["Service"]["Cabang"] == "TOTAL"]
+        gadget_row = sb_dict["Gadget & Aksesoris"][sb_dict["Gadget & Aksesoris"]["Cabang"] == "TOTAL"]
 
-    if not sb_all.empty:
-        total_row = sb_all[sb_all["Cabang"] == "SMM"].iloc[0]
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            render_kpi_card_text("Omset S/D Hari Ini", format_rupiah(total_row["SdHariIni"]), "#1d4ed8", "💰")
-        with k2:
-            render_kpi_card_text("Target Kuartal", format_rupiah(total_row["OmsetSamurai"]), "#0f766e", "🎯")
-        with k3:
-            render_kpi_card_text("% Pencapaian", format_percent(total_row["PctPencapaian"]),
-                                  pencapaian_color(total_row["PctPencapaian"]), "📈")
-        with k4:
-            render_kpi_card_text("Kejar Target/Hari", format_rupiah(total_row["KejarPerhari"]), "#dc2626", "⏱️")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            v = omset_all_row.iloc[0] if not omset_all_row.empty else None
+            st.markdown(render_kpi_card("S/D Hari Ini (Omset All)", format_rupiah(v["SdHariIni"]) if v is not None else "Rp 0", "#0f766e", "💰"), unsafe_allow_html=True)
+        with c2:
+            v = service_row.iloc[0] if not service_row.empty else None
+            st.markdown(render_kpi_card("S/D Hari Ini (Service)", format_rupiah(v["SdHariIni"]) if v is not None else "Rp 0", "#2563eb", "🔧"), unsafe_allow_html=True)
+        with c3:
+            v = gadget_row.iloc[0] if not gadget_row.empty else None
+            st.markdown(render_kpi_card("S/D Hari Ini (Gadget & Aksesoris)", format_rupiah(v["SdHariIni"]) if v is not None else "Rp 0", "#d97706", "📱"), unsafe_allow_html=True)
 
-        st.markdown("#### Progres Pencapaian")
+        st.markdown("###### % Pencapaian Target")
         r1, r2, r3 = st.columns(3)
         with r1:
-            render_progress_ring("Omset All", total_row["PctPencapaian"], "all")
-        if not sb_service.empty:
-            with r2:
-                tr_s = sb_service[sb_service["Cabang"] == "SMM"].iloc[0]
-                render_progress_ring("Service", tr_s["PctPencapaian"], "service")
-        if not sb_gadget.empty:
-            with r3:
-                tr_g = sb_gadget[sb_gadget["Cabang"] == "SMM"].iloc[0]
-                render_progress_ring("Gadget & Aksesoris", tr_g["PctPencapaian"], "gadget")
+            v = omset_all_row.iloc[0] if not omset_all_row.empty else None
+            st.markdown(render_progress_ring(v["PctPencapaian"] if v is not None else None, "Omset All"), unsafe_allow_html=True)
+        with r2:
+            v = service_row.iloc[0] if not service_row.empty else None
+            st.markdown(render_progress_ring(v["PctPencapaian"] if v is not None else None, "Service"), unsafe_allow_html=True)
+        with r3:
+            v = gadget_row.iloc[0] if not gadget_row.empty else None
+            st.markdown(render_progress_ring(v["PctPencapaian"] if v is not None else None, "Gadget & Aksesoris"), unsafe_allow_html=True)
 
-        st.markdown("#### Grafik Progres Harian (Realisasi vs Pace Target) — Kuartal Berjalan")
-        g = build_daily_progress(df_main, tanggal_acuan, target_map, "Omset All", selected_branches)
-        render_daily_progress_chart(g, "daily_progress_ringkasan")
+        st.markdown("###### Progres Harian (Kuartal Berjalan)")
+        g_daily = build_daily_progress(df_main, tanggal_acuan, selected_branches)
+        if not g_daily.empty:
+            st.plotly_chart(render_daily_progress_chart(g_daily), use_container_width=True, key="chart_daily_progress")
+        else:
+            st.caption("Belum ada data harian untuk periode ini.")
 
-        if df_main is not None and not df_main.empty:
-            d_period = df_main[(df_main["Tahun"] == tanggal_acuan.year) & (df_main["Bulan"] == tanggal_acuan.month) &
-                                (df_main["Tanggal"].apply(lambda x: x.day) <= tanggal_acuan.day)]
-            if selected_branches:
-                d_period = d_period[d_period["Cabang"].isin(selected_branches)]
-            if not d_period.empty:
-                st.markdown("#### Kontribusi Omset: Service vs Gadget & Aksesoris vs Marketing Corporate")
-                svc = float(d_period[d_period["Kelompok"] == "Service"]["TotalHarga"].sum())
-                gdg = float(d_period[d_period["Kelompok"] == "Gadget & Aksesoris"]["TotalHarga"].sum())
-                mc = float(d_period[d_period["KelompokPenjual"] == _MC_LABEL]["TotalHarga"].sum())
-                retail = float(d_period["TotalHarga"].sum()) - mc
-                cc1, cc2 = st.columns(2)
-                with cc1:
-                    render_contribution_pie(["Service", "Gadget & Aksesoris"], [svc, gdg], "pie_kategori")
-                with cc2:
-                    render_contribution_pie(["Marketing Corporate", "Sales Retail"], [mc, retail], "pie_mc_retail")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            st.markdown("###### Kontribusi Marketing Corporate vs Retail")
+            if not mc_summary.empty:
+                fig_mc = render_mc_split_donut(mc_summary)
+                if fig_mc:
+                    st.plotly_chart(fig_mc, use_container_width=True, key="chart_mc_split_ringkasan")
+            else:
+                st.caption("Belum ada data.")
+        with cc2:
+            st.markdown("###### Kontribusi 6 Pilar")
+            if not pilar_summary.empty:
+                fig_pilar = render_contribution_pie(
+                    [_pilar_label(p) for p in pilar_summary["Pilar"]],
+                    pilar_summary["Omset"],
+                    [PILAR_COLORS.get(p, "#9ca3af") for p in pilar_summary["Pilar"]],
+                )
+                st.plotly_chart(fig_pilar, use_container_width=True, key="chart_pilar_ringkasan")
+            else:
+                st.caption("Belum ada data.")
 
-        st.markdown("#### Riwayat Pencapaian Harian")
-        hc1, hc2, hc3 = st.columns(3)
-        with hc1:
-            hist_cabang = st.selectbox("Cabang", ["Semua"] + all_branches_present, key="hist_cabang")
-        with hc2:
-            hist_bulan = st.selectbox("Bulan", ["Semua"] + list(BULAN_ID.values()), key="hist_bulan")
-        with hc3:
-            tahun_opts = sorted(log_df["Tahun"].unique().tolist()) if not log_df.empty else [date.today().year]
-            hist_tahun = st.selectbox("Tahun", ["Semua"] + tahun_opts, key="hist_tahun")
-        d_hist = build_daily_history(
-            log_df[log_df["Kelompok"] == "Omset All"] if not log_df.empty else log_df,
-            cabang=None if hist_cabang == "Semua" else hist_cabang,
-            bulan=None if hist_bulan == "Semua" else list(BULAN_ID.values()).index(hist_bulan) + 1,
-            tahun=None if hist_tahun == "Semua" else hist_tahun,
-        )
-        render_daily_history_chart(d_hist, "daily_history_ringkasan")
-    else:
-        st.info("Belum ada target/data untuk menampilkan ringkasan. Upload data Omset & Target di sidebar.")
+        st.markdown("###### Riwayat 30 Hari Terakhir")
+        g_hist = build_daily_history(df_main, selected_branches)
+        if not g_hist.empty:
+            st.plotly_chart(render_daily_history_chart(g_hist), use_container_width=True, key="chart_daily_history")
 
-# ========================= TAB 2: SCOREBOARD =========================
+        all_insights = generate_all_sales_insights(df_main) if not df_main.empty else []
+        if all_insights:
+            st.markdown("###### 💡 Insight & Rekomendasi")
+            for ins in all_insights[:5]:
+                render_structured_insight_card(ins)
+
 with tab2:
-    st.subheader(f"Scoreboard — {periode_label}")
-    st.caption(
-        "Mengikuti persis rumus pada sheet Excel 'Scoreboard' & 'Data Periode': "
-        "OMSET HARIAN = OMSET SAMURAI ÷ TOTAL HARI kuartal, EXPECTED VALUE = OMSET HARIAN × hari berjalan "
-        "dalam kuartal, % PENCAPAIAN = S/D HARI INI ÷ EXPECTED VALUE."
-    )
-    if _snapshot_date:
-        st.caption(f"Tanggal snapshot terdeteksi dari file Scoreboard: {_snapshot_date}")
+    st.subheader(f"🏆 Scoreboard — {periode_label}")
+    st.caption(f"Kuartal berjalan: {quarter_period_label} • Total hari: {q_total_hari} • Hari berjalan: {q_hari_berjalan} • Sisa hari: {q_sisa_hari}")
 
-    exp_c1, exp_c2, exp_c3 = st.columns([1, 1, 4])
+    exp_c1, exp_c2 = st.columns(2)
     with exp_c1:
-        st.download_button(
-            "📄 Export Scoreboard (PDF)",
-            data=generate_scoreboard_pdf(scoreboards, periode_label),
-            file_name=f"Scoreboard_MFlash_{sanitize_filename(periode_label)}.pdf",
-            mime="application/pdf",
-            key="dl_scoreboard_pdf",
-        )
+        pdf_bytes = generate_scoreboard_pdf(sb_dict)
+        st.download_button("📄 Export Scoreboard (PDF)", data=pdf_bytes, file_name=f"scoreboard_mflash_{tanggal_acuan}.pdf",
+                            mime="application/pdf", key="dl_scoreboard_pdf")
     with exp_c2:
-        _sb_zip_target = scoreboards[_SCOREBOARD_KATEGORI_LABEL["Omset All"]]
-        st.download_button(
-            "🖼️ Export Scoreboard All (JPG)",
-            data=generate_scoreboard_table_image(_sb_zip_target, "SCOREBOARD OMSET ALL", periode_label),
-            file_name=f"Scoreboard_OmsetAll_{sanitize_filename(periode_label)}.jpg",
-            mime="image/jpeg",
-            key="dl_scoreboard_jpg_all",
-        )
+        st.caption("Export JPEG per kategori tersedia di bawah masing-masing tabel.")
 
     for kat in SCOREBOARD_KATEGORI:
-        title = _SCOREBOARD_KATEGORI_LABEL[kat]
-        df_score = scoreboards[title]
-        st.markdown(render_scoreboard_html(df_score, title, periode_label), unsafe_allow_html=True)
-        if not df_score.empty:
-            jc1, jc2 = st.columns([1, 5])
-            with jc1:
-                st.download_button(
-                    f"🖼️ JPG — {title}",
-                    data=generate_scoreboard_table_image(df_score, title, periode_label),
-                    file_name=f"{sanitize_filename(title)}_{sanitize_filename(periode_label)}.jpg",
-                    mime="image/jpeg",
-                    key=f"dl_jpg_{kat}",
-                )
+        st.markdown(render_scoreboard_html(sb_dict[kat], kat), unsafe_allow_html=True)
+        jpg_bytes = generate_scoreboard_table_image(sb_dict[kat], kat)
+        st.download_button(f"🖼️ Export {kat} (JPEG)", data=jpg_bytes,
+                            file_name=f"scoreboard_{sanitize_filename(kat)}_{tanggal_acuan}.jpg",
+                            mime="image/jpeg", key=f"dl_scoreboard_jpg_{kat}")
         st.markdown("<br/>", unsafe_allow_html=True)
 
-# ========================= TAB 3: IKLAN =========================
 with tab3:
-    st.subheader("Performa Iklan (Meta Ads)")
-    if df_ads is None or df_ads.empty:
-        st.info("Belum ada data iklan yang diunggah.")
+    st.subheader(f"📢 Iklan (Meta Ads) — {periode_label}")
+    if df_ads.empty:
+        st.info("Belum ada data Iklan. Unggah file export Meta Ads di sidebar.")
     else:
-        d_ads = df_ads[df_ads["Cabang"].isin(selected_branches)] if selected_branches else df_ads
-        agg = aggregate_ads_by_branch(d_ads)
-        if not agg.empty:
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                render_kpi_card_text("Total Spend", format_rupiah(agg.get("AmountSpent", pd.Series([0])).sum()), "#1d4ed8", "💸")
-            with m2:
-                render_kpi_card_text("Total Reach", format_number(agg.get("Reach", pd.Series([0])).sum()), "#0f766e", "👥")
-            with m3:
-                render_kpi_card_text("Total Impressions", format_number(agg.get("Impressions", pd.Series([0])).sum()), "#6d28d9", "👁️")
-            if "AmountSpent" in agg.columns:
-                fig = px.bar(agg, x="Cabang", y="AmountSpent", text_auto=".2s", color_discrete_sequence=["#1d4ed8"])
-                fig.update_layout(height=340, margin=dict(l=10, r=10, t=20, b=10))
-                st.plotly_chart(fig, use_container_width=True, key="ads_bar")
-            st.markdown("#### Insight & Rekomendasi")
-            for ins in generate_ads_insights(agg):
+        ads_agg = aggregate_ads_by_branch(df_ads)
+        if selected_branches:
+            ads_agg = ads_agg[ads_agg["Cabang"].isin(selected_branches)]
+        total_spend = ads_agg["AmountSpent"].sum() if "AmountSpent" in ads_agg.columns else 0
+        total_results = ads_agg["Results"].sum() if "Results" in ads_agg.columns else 0
+        total_reach = ads_agg["Reach"].sum() if "Reach" in ads_agg.columns else 0
+
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            st.markdown(render_kpi_card("Total Amount Spent", format_rupiah(total_spend), "#7c3aed", "💸"), unsafe_allow_html=True)
+        with k2:
+            st.markdown(render_kpi_card("Total Results", format_number(total_results), "#2563eb", "🎯"), unsafe_allow_html=True)
+        with k3:
+            st.markdown(render_kpi_card("Total Reach", format_number(total_reach), "#059669", "📡"), unsafe_allow_html=True)
+
+        if not ads_agg.empty and "AmountSpent" in ads_agg.columns:
+            fig_ads = go.Figure()
+            fig_ads.add_trace(go.Bar(x=ads_agg["Cabang"], y=ads_agg["AmountSpent"], marker_color="#7c3aed",
+                                      text=[format_rupiah(v) for v in ads_agg["AmountSpent"]], textposition="outside"))
+            fig_ads.update_layout(height=340, margin=dict(t=20, b=10, l=10, r=10), xaxis_title="Cabang", yaxis_title="Amount Spent")
+            st.plotly_chart(fig_ads, use_container_width=True, key="chart_ads_spend")
+
+        st.dataframe(ads_agg, use_container_width=True, hide_index=True)
+
+        ads_insights = generate_ads_insights(ads_agg)
+        if ads_insights:
+            st.markdown("###### 💡 Insight & Rekomendasi Iklan")
+            for ins in ads_insights[:5]:
                 render_insight_card(ins)
-        else:
-            st.info("Kolom data iklan tidak lengkap untuk agregasi.")
 
-# ========================= TAB 4: WALK-IN =========================
 with tab4:
-    st.subheader(f"Walk-in per Cabang — {periode_label}")
-    if df_walkin is None or df_walkin.empty:
-        st.info("Belum ada data walk-in yang diunggah.")
+    st.subheader(f"🚶 Walk-in per Cabang — {quarter_period_label}")
+    if df_walkin.empty:
+        st.info("Belum ada data Walk-in. Unggah file export Rincian Pengiriman Pesanan di sidebar.")
     else:
-        d_current = aggregate_walkin_current_period(df_walkin, tanggal_acuan, selected_branches)
-        d_current = _walkin_ordered(d_current)
+        d_walkin = _walkin_ordered(walkin_agg_current)
+        st.markdown(render_walkin_table_html(d_walkin, quarter_period_label), unsafe_allow_html=True)
 
-        total_walkin = int(d_current["TotalWalkin"].sum()) if not d_current.empty else 0
-        avg_walkin = _walkin_overall_avg(d_current)
-        n_cabang = d_current["Cabang"].nunique() if not d_current.empty else 0
+        we1, we2 = st.columns(2)
+        with we1:
+            jpg_bytes = generate_walkin_table_image(d_walkin, quarter_period_label)
+            st.download_button("🖼️ Export Tabel Walk-in (JPEG)", data=jpg_bytes,
+                                file_name=f"walkin_{tanggal_acuan}.jpg", mime="image/jpeg", key="dl_walkin_jpg")
+        with we2:
+            pdf_bytes = generate_walkin_table_pdf(d_walkin, quarter_period_label)
+            st.download_button("📄 Export Tabel Walk-in (PDF)", data=pdf_bytes,
+                                file_name=f"walkin_{tanggal_acuan}.pdf", mime="application/pdf", key="dl_walkin_pdf")
 
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            render_kpi_card_text("Total Walk-in", format_number(total_walkin), "#0f766e", "🚶")
-        with m2:
-            render_kpi_card_text("Rata-rata Walk-in/Hari", format_decimal(avg_walkin), "#1d4ed8", "📊")
-        with m3:
-            render_kpi_card_text("Jumlah Cabang", format_number(n_cabang), "#6d28d9", "🏬")
+        if not d_walkin.empty:
+            fig_walkin = go.Figure()
+            fig_walkin.add_trace(go.Bar(x=d_walkin["Cabang"], y=d_walkin["TotalWalkin"], marker_color="#0f766e",
+                                         text=[format_number(v) for v in d_walkin["TotalWalkin"]], textposition="outside"))
+            fig_walkin.update_layout(height=340, margin=dict(t=20, b=10, l=10, r=10), xaxis_title="Cabang", yaxis_title="Total Walk-in")
+            st.plotly_chart(fig_walkin, use_container_width=True, key="chart_walkin_total")
 
-        if not d_current.empty:
-            fig = px.bar(d_current, x="Cabang", y="TotalWalkin", text_auto=True, color_discrete_sequence=["#0f766e"])
-            fig.update_layout(height=340, margin=dict(l=10, r=10, t=20, b=10))
-            st.plotly_chart(fig, use_container_width=True, key="walkin_bar")
-
-        st.markdown(render_walkin_table_html(d_current, periode_label), unsafe_allow_html=True)
-
-        if not d_current.empty:
-            dc1, dc2 = st.columns(2)
-            with dc1:
-                st.download_button("🖼️ Download Tabel (JPG)", data=generate_walkin_table_image(d_current, periode_label),
-                                    file_name=f"Walkin_{sanitize_filename(periode_label)}.jpg", mime="image/jpeg",
-                                    key="dl_walkin_jpg")
-            with dc2:
-                st.download_button("📄 Download Tabel (PDF)", data=generate_walkin_table_pdf(d_current, periode_label),
-                                    file_name=f"Walkin_{sanitize_filename(periode_label)}.pdf", mime="application/pdf",
-                                    key="dl_walkin_pdf")
-
-        st.markdown("#### 💡 Insight & Rekomendasi Program Marketing")
-        for ins in generate_walkin_marketing_insights(d_current):
-            render_structured_insight_card(ins)
-
-        st.markdown("#### 📈 Insight Tren Bulanan (Dibanding Bulan Lalu)")
-        walkin_agg_hist = aggregate_walkin_monthly(df_walkin if not selected_branches else df_walkin[df_walkin["Cabang"].isin(selected_branches)])
-        tren_insights = generate_walkin_insights(walkin_agg_hist)
-        if tren_insights:
-            for ins in tren_insights:
+        wk_marketing_insights = generate_walkin_marketing_insights(d_walkin)
+        wk_trend_insights = generate_walkin_insights(walkin_agg_monthly)
+        all_wk_insights = wk_marketing_insights + wk_trend_insights
+        if all_wk_insights:
+            st.markdown("###### 💡 Insight & Rekomendasi Walk-in")
+            for ins in all_wk_insights[:5]:
                 render_structured_insight_card(ins)
-        else:
-            st.caption("Belum ada tren penurunan signifikan dibanding bulan lalu.")
 
-# ========================= TAB 5: 6 PILAR MFLASH =========================
 with tab5:
-    st.subheader(f"6 Pilar MFlash — {periode_label}")
-    if df_main is None or df_main.empty:
-        st.info("Belum ada data Omset yang diunggah.")
+    st.subheader(f"🧩 6 Pilar MFlash — {quarter_period_label}")
+    if pilar_summary.empty:
+        st.info("Belum ada data 6 Pilar untuk periode ini.")
     else:
-        pilar_summary = build_pilar_summary(df_main, tanggal_acuan, selected_branches)
-        if pilar_summary.empty:
-            st.info("Tidak ada data untuk periode ini.")
-        else:
-            kpi_cols = st.columns(len(PILAR_ORDER))
-            for i, p in enumerate(PILAR_ORDER):
-                row = pilar_summary[pilar_summary["Pilar"] == p]
-                if not row.empty:
-                    with kpi_cols[i]:
-                        render_pilar_kpi_card(row.iloc[0])
+        cols_pilar = st.columns(len(pilar_summary))
+        for i, (_, r) in enumerate(pilar_summary.iterrows()):
+            with cols_pilar[i]:
+                st.markdown(render_pilar_kpi_card(r["Pilar"], r["Omset"], r["Qty"]), unsafe_allow_html=True)
 
-            pc1, pc2 = st.columns([1, 1])
-            with pc1:
-                fig = px.pie(pilar_summary, names="Pilar", values="Omset", hole=0.4,
-                              color="Pilar", color_discrete_map=PILAR_COLORS)
-                fig.update_layout(height=340, margin=dict(l=10, r=10, t=20, b=10))
-                st.plotly_chart(fig, use_container_width=True, key="pilar_pie")
-            with pc2:
-                st.markdown(render_pilar_summary_table_html(pilar_summary), unsafe_allow_html=True)
+        st.markdown("<br/>", unsafe_allow_html=True)
+        cpi1, cpi2 = st.columns([1, 1])
+        with cpi1:
+            fig_pilar2 = render_contribution_pie(
+                [_pilar_label(p) for p in pilar_summary["Pilar"]],
+                pilar_summary["Omset"],
+                [PILAR_COLORS.get(p, "#9ca3af") for p in pilar_summary["Pilar"]],
+                title="Kontribusi Omset per Pilar",
+            )
+            st.plotly_chart(fig_pilar2, use_container_width=True, key="chart_pilar_tab5")
+        with cpi2:
+            st.markdown("###### Ringkasan per Pilar")
+            st.markdown(render_pilar_table_html(pilar_summary), unsafe_allow_html=True)
 
-            st.markdown("#### Detail Omset per Pilar per Cabang")
-            piv = build_pilar_by_branch(df_main, tanggal_acuan, selected_branches)
-            if not piv.empty:
-                fig2 = go.Figure()
-                for p in PILAR_ORDER:
-                    fig2.add_trace(go.Bar(name=p, x=piv["Cabang"], y=piv[p], marker_color=PILAR_COLORS.get(p)))
-                fig2.update_layout(barmode="stack", height=380, margin=dict(l=10, r=10, t=20, b=10),
-                                    legend=dict(orientation="h", y=1.15))
-                st.plotly_chart(fig2, use_container_width=True, key="pilar_stack")
-                st.markdown(render_pilar_table_html(piv), unsafe_allow_html=True)
+        st.markdown("###### Detail per Cabang")
+        st.markdown(render_pilar_summary_table_html(pilar_by_branch), unsafe_allow_html=True)
 
-            st.markdown("#### Insight Kualitas Data")
-            for ins in generate_pilar_insights(pilar_summary):
+        pilar_insights = generate_pilar_insights(pilar_summary)
+        if pilar_insights:
+            st.markdown("###### 💡 Insight & Rekomendasi")
+            for ins in pilar_insights[:5]:
                 render_structured_insight_card(ins)
 
-# ========================= TAB 6: KONTRIBUSI MARKETING CORPORATE =========================
 with tab6:
-    st.subheader(f"🤝 Kontribusi Marketing Corporate — {periode_label}")
-    if df_main is None or df_main.empty:
-        st.info("Belum ada data Omset yang diunggah.")
+    st.subheader(f"🤝 Kontribusi Marketing Corporate vs Sales Retail — {quarter_period_label}")
+    if mc_summary.empty:
+        st.info("Belum ada data untuk periode ini.")
     else:
-        mc_summary = build_mc_contribution_summary(df_main, tanggal_acuan, selected_branches)
-        mc_person = build_mc_person_table(df_main, tanggal_acuan, selected_branches)
+        total_mc = mc_summary["Omset"].sum()
+        cols_mc = st.columns(len(mc_summary))
+        for i, (_, r) in enumerate(mc_summary.iterrows()):
+            with cols_mc[i]:
+                st.markdown(render_mc_contribution_card(r["Kelompok"], r["Omset"], total_mc), unsafe_allow_html=True)
 
-        if not mc_summary.empty:
-            cols = st.columns(len(_MC_CATEGORY_ORDER))
-            for i, kat in enumerate(_MC_CATEGORY_ORDER):
-                row = mc_summary[mc_summary["Kategori"] == kat]
-                if not row.empty:
-                    with cols[i]:
-                        render_mc_contribution_card(kat, row.iloc[0])
+        st.markdown("<br/>", unsafe_allow_html=True)
+        fig_mc2 = render_mc_split_donut(mc_summary)
+        if fig_mc2:
+            st.plotly_chart(fig_mc2, use_container_width=True, key="chart_mc_split_tab6")
 
-            dc = st.columns(len(_MC_CATEGORY_ORDER))
-            for i, kat in enumerate(_MC_CATEGORY_ORDER):
-                row = mc_summary[mc_summary["Kategori"] == kat]
-                if not row.empty:
-                    with dc[i]:
-                        st.caption(_MC_CATEGORY_LABELS[kat])
-                        render_mc_split_donut(row.iloc[0], f"mc_donut_{kat}")
+        st.markdown("###### Detail Marketing Corporate per Sales")
+        st.markdown(render_mc_person_table_html(mc_person_table), unsafe_allow_html=True)
 
-        st.markdown("#### Kontribusi per Orang (Marketing Corporate)")
-        st.markdown(render_mc_person_table_html(mc_person), unsafe_allow_html=True)
-        if not mc_person.empty:
-            d_bar = mc_person[mc_person["Penjual"] != "TOTAL"]
-            if not d_bar.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Bar(name="Service", x=d_bar["Penjual"], y=d_bar["Service"], marker_color="#0f766e"))
-                fig.add_trace(go.Bar(name="Gadget & Aksesoris", x=d_bar["Penjual"], y=d_bar["Gadget & Aksesoris"], marker_color="#6d28d9"))
-                fig.update_layout(barmode="stack", height=360, margin=dict(l=10, r=10, t=20, b=10),
-                                   legend=dict(orientation="h", y=1.15))
-                st.plotly_chart(fig, use_container_width=True, key="mc_person_bar")
-
-        st.markdown("#### Insight Marketing Corporate")
-        for ins in generate_mc_insights(mc_summary, mc_person):
-            render_structured_insight_card(ins)
-
-        st.markdown("---")
-        retail_by_branch = build_retail_by_branch(df_main, tanggal_acuan, selected_branches)
+        st.markdown("###### Omset Retail per Cabang")
         st.markdown(render_retail_by_branch_table_html(retail_by_branch), unsafe_allow_html=True)
         if not retail_by_branch.empty:
-            d_bar2 = retail_by_branch[retail_by_branch["Cabang"] != "TOTAL"]
-            if not d_bar2.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Bar(name="Service", x=d_bar2["Cabang"], y=d_bar2["Service"], marker_color="#0f766e"))
-                fig.add_trace(go.Bar(name="Gadget & Aksesoris", x=d_bar2["Cabang"], y=d_bar2["Gadget & Aksesoris"], marker_color="#6d28d9"))
-                fig.update_layout(barmode="stack", height=360, margin=dict(l=10, r=10, t=20, b=10),
-                                   legend=dict(orientation="h", y=1.15))
-                st.plotly_chart(fig, use_container_width=True, key="retail_branch_bar")
+            fig_retail = go.Figure()
+            fig_retail.add_trace(go.Bar(x=retail_by_branch["Cabang"], y=retail_by_branch["Omset"], marker_color="#0f766e",
+                                         text=[format_rupiah(v) for v in retail_by_branch["Omset"]], textposition="outside"))
+            fig_retail.update_layout(height=340, margin=dict(t=20, b=10, l=10, r=10), xaxis_title="Cabang", yaxis_title="Omset Retail")
+            st.plotly_chart(fig_retail, use_container_width=True, key="chart_retail_branch")
 
-        st.markdown("#### Insight Sales Retail per Cabang")
-        for ins in generate_retail_branch_insights(retail_by_branch):
-            render_structured_insight_card(ins)
+        mc_insights = generate_mc_insights(mc_summary)
+        retail_insights = generate_retail_branch_insights(retail_by_branch)
+        combined_insights = mc_insights + retail_insights
+        if combined_insights:
+            st.markdown("###### 💡 Insight & Rekomendasi")
+            for ins in combined_insights[:5]:
+                render_structured_insight_card(ins)
 
-# ========================= EXPORT LAPORAN LENGKAP =========================
 st.markdown("---")
-st.markdown("### 📤 Export Laporan Lengkap")
-ex1, ex2 = st.columns(2)
-with ex1:
-    st.download_button(
-        "📊 Export ke PowerPoint (PPTX)",
-        data=generate_pptx_report(df_main, scoreboards, periode_label),
-        file_name=f"Laporan_MFlash_{sanitize_filename(periode_label)}.pptx",
-        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        key="dl_full_pptx",
-    )
-with ex2:
-    st.download_button(
-        "📄 Export ke PDF",
-        data=generate_pdf_report(df_main, scoreboards, periode_label),
-        file_name=f"Laporan_MFlash_{sanitize_filename(periode_label)}.pdf",
-        mime="application/pdf",
-        key="dl_full_pdf",
-    )
+st.subheader("📦 Export Laporan Lengkap")
+exp1, exp2 = st.columns(2)
+with exp1:
+    if st.button("📊 Buat Laporan PPTX", key="btn_gen_pptx"):
+        pptx_bytes = generate_pptx_report(df_main, sb_dict, walkin_agg_current, pilar_summary, mc_summary, quarter_period_label)
+        st.session_state["_pptx_report"] = pptx_bytes
+    if st.session_state.get("_pptx_report"):
+        st.download_button("⬇️ Download Laporan PPTX", data=st.session_state["_pptx_report"],
+                            file_name=f"laporan_mflash_{tanggal_acuan}.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            key="dl_pptx_report")
+with exp2:
+    if st.button("📄 Buat Laporan PDF", key="btn_gen_pdf"):
+        pdf_bytes = generate_pdf_report(df_main, sb_dict, walkin_agg_current, pilar_summary, mc_summary, quarter_period_label)
+        st.session_state["_pdf_report"] = pdf_bytes
+    if st.session_state.get("_pdf_report"):
+        st.download_button("⬇️ Download Laporan PDF", data=st.session_state["_pdf_report"],
+                            file_name=f"laporan_mflash_{tanggal_acuan}.pdf", mime="application/pdf",
+                            key="dl_pdf_report")
