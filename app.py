@@ -1,19 +1,22 @@
 """Dashboard Omset MFlash
 
 Dashboard Streamlit untuk memantau Omset, Iklan (Meta Ads), Walk-in,
-6 Pilar MFlash, dan Kontribusi Marketing Corporate vs Sales Retail
-di 18 cabang MFlash. Termasuk styling tabel Walk-in (kotak + warna),
-export tabel Walk-in & Scoreboard ke JPG/PDF, insight otomatis, dan
-export laporan lengkap ke PPTX/PDF. Scoreboard mengikuti persis format
-& rumus pada sheet "Scoreboard" di file Excel master (target kuartalan,
-EXPECTED VALUE berdasar hari berjalan dalam kuartal, % PENCAPAIAN =
-S/D HARI INI dibagi EXPECTED VALUE). Tabel Walk-in per cabang bersifat
-KUMULATIF dari awal kuartal (1 Juli/Okt/Jan/Apr) sampai Tanggal Acuan
-yang dipilih (konsisten dengan S/D HARI INI di Scoreboard). Loader data
-Omset & Walk-in memakai pandas.read_excel (bukan openpyxl read_only)
-supaya tahan terhadap file export MFlash dengan metadata dimensi sheet
-yang tidak akurat. Loader Iklan mem-buang kolom duplikat sebelum
-digabung (pd.concat) untuk mencegah pandas.errors.InvalidIndexError.
+6 Pilar MFlash, Kontribusi Marketing Corporate vs Sales Retail, dan
+Project Tracker Sales & Marketing di 18 cabang MFlash. Termasuk styling
+tabel Walk-in (kotak + warna), export tabel Walk-in & Scoreboard ke
+JPG/PDF, insight otomatis, dan export laporan lengkap ke PPTX/PDF.
+Scoreboard mengikuti persis format & rumus pada sheet "Scoreboard" di
+file Excel master (target kuartalan, EXPECTED VALUE berdasar hari
+berjalan dalam kuartal, % PENCAPAIAN = S/D HARI INI dibagi EXPECTED
+VALUE). Tabel Walk-in per cabang bersifat KUMULATIF dari awal kuartal
+(1 Juli/Okt/Jan/Apr) sampai Tanggal Acuan yang dipilih (konsisten
+dengan S/D HARI INI di Scoreboard). Loader data Omset & Walk-in
+memakai pandas.read_excel (bukan openpyxl read_only) supaya tahan
+terhadap file export MFlash dengan metadata dimensi sheet yang tidak
+akurat. Loader Iklan mem-buang kolom duplikat sebelum digabung
+(pd.concat) untuk mencegah pandas.errors.InvalidIndexError. Tab
+Sales & Marketing berisi project tracker interaktif (tambah/edit/hapus
+baris langsung di dashboard) dengan status, due date, PIC, dan progress.
 """
 
 import base64
@@ -184,6 +187,7 @@ def sync_data_from_github():
     for remote_dir, local_dir in [
         ("data/main", "data/main"), ("data/ads", "data/ads"), ("data/walkin", "data/walkin"),
         ("data/target", "data/target"), ("data/corp", "data/corp"), ("data/log", "data/log"),
+        ("data/projects", "data/projects"),
     ]:
         for fname in github_list_dir(remote_dir):
             local_path = os.path.join(local_dir, fname)
@@ -202,6 +206,7 @@ WALKIN_DATA_DIR = os.path.join(DATA_DIR, "walkin")
 TARGET_DATA_DIR = os.path.join(DATA_DIR, "target")
 CORP_DATA_DIR = os.path.join(DATA_DIR, "corp")
 LOG_DIR = os.path.join(DATA_DIR, "log")
+PROJECTS_DATA_DIR = os.path.join(DATA_DIR, "projects")
 
 BRANCH_ORDER = [
     "KLENDER", "CEGER", "BINTARA", "RADJIMAN", "JATIMULYA", "DRAMAGA",
@@ -2091,6 +2096,66 @@ def compute_corp_hari_ini(df_corp: pd.DataFrame, tanggal_acuan: date) -> float:
     return total / days_in_month if days_in_month else total
 
 
+# ========================= Sales & Marketing Project Tracker =========================
+
+_PROJECTS_PATH = os.path.join(DATA_DIR, "projects", "sales_marketing_projects.csv")
+_PROJECTS_COLUMNS = ["Nama Project", "Status", "Due Date", "PIC", "Progress (%)"]
+_PROJECT_STATUS_OPTIONS = ["Belum Mulai", "Berjalan", "Selesai", "Tertunda"]
+_PROJECT_STATUS_COLORS = {
+    "Belum Mulai": "#9ca3af", "Berjalan": "#2563eb", "Selesai": "#16a34a", "Tertunda": "#dc2626",
+}
+
+
+def _read_projects() -> pd.DataFrame:
+    if not os.path.exists(_PROJECTS_PATH):
+        return pd.DataFrame(columns=_PROJECTS_COLUMNS)
+    try:
+        df = pd.read_csv(_PROJECTS_PATH)
+    except Exception:
+        return pd.DataFrame(columns=_PROJECTS_COLUMNS)
+    for c in _PROJECTS_COLUMNS:
+        if c not in df.columns:
+            df[c] = None
+    df = df[_PROJECTS_COLUMNS]
+    if "Due Date" in df.columns:
+        df["Due Date"] = pd.to_datetime(df["Due Date"], errors="coerce").dt.date
+    if "Progress (%)" in df.columns:
+        df["Progress (%)"] = pd.to_numeric(df["Progress (%)"], errors="coerce").fillna(0).clip(0, 100)
+    return df.reset_index(drop=True)
+
+
+def _save_projects(df: pd.DataFrame):
+    os.makedirs(os.path.dirname(_PROJECTS_PATH), exist_ok=True)
+    out = df.copy()
+    for c in _PROJECTS_COLUMNS:
+        if c not in out.columns:
+            out[c] = None
+    out = out[_PROJECTS_COLUMNS]
+    out.to_csv(_PROJECTS_PATH, index=False)
+    try:
+        if _GH_ENABLED:
+            github_upload_file(f"data/projects/{os.path.basename(_PROJECTS_PATH)}", open(_PROJECTS_PATH, "rb").read())
+    except Exception:
+        pass
+
+
+def _project_is_overdue(row) -> bool:
+    dd = row.get("Due Date")
+    status = str(row.get("Status") or "")
+    if dd is None or (isinstance(dd, float) and pd.isna(dd)):
+        return False
+    try:
+        dd = pd.to_datetime(dd).date()
+    except Exception:
+        return False
+    return dd < date.today() and status != "Selesai"
+
+
+def render_project_status_badge(status: str) -> str:
+    color = _PROJECT_STATUS_COLORS.get(status, "#6b7280")
+    return f'<span style="background:{color};color:white;padding:2px 10px;border-radius:12px;font-size:0.8em;font-weight:600;">{status}</span>'
+
+
 # ========================= PPTX / PDF Full Report Export ==========================
 
 def _pptx_add_title_slide(prs, title: str, subtitle: str = ""):
@@ -2192,7 +2257,7 @@ def generate_pdf_report(df_main, sb_dict, walkin_df, pilar_summary, mc_summary, 
 
 # ========================= UI ==========================
 
-for _d in [MAIN_DATA_DIR, ADS_DATA_DIR, WALKIN_DATA_DIR, TARGET_DATA_DIR, CORP_DATA_DIR, LOG_DIR]:
+for _d in [MAIN_DATA_DIR, ADS_DATA_DIR, WALKIN_DATA_DIR, TARGET_DATA_DIR, CORP_DATA_DIR, LOG_DIR, PROJECTS_DATA_DIR]:
     os.makedirs(_d, exist_ok=True)
 
 if _GH_ENABLED and not st.session_state.get("_gh_synced"):
@@ -2210,7 +2275,7 @@ st.markdown(
         <img src="data:image/png;base64,{LOGO_BASE64}" style="height:64px;" />
         <div>
             <div style="font-size:1.5em;font-weight:800;color:#0f766e;">Dashboard Omset MFlash</div>
-            <div style="font-size:0.9em;color:#6b7280;">Monitoring Omset, Iklan, Walk-in, 6 Pilar &amp; Kontribusi Marketing</div>
+            <div style="font-size:0.9em;color:#6b7280;">Monitoring Omset, Iklan, Walk-in, 6 Pilar, Kontribusi Marketing &amp; Project Sales &amp; Marketing</div>
         </div>
     </div>
     """,
@@ -2439,8 +2504,8 @@ retail_by_branch = build_retail_by_branch(df_main, tanggal_acuan, selected_branc
 if not df_main.empty:
     build_upload_log(df_main)
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🏠 Ringkasan", "🏆 Scoreboard", "📢 Iklan", "🚶 Walk-in", "🧩 6 Pilar", "🤝 Kontribusi MC",
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "🏠 Ringkasan", "🏆 Scoreboard", "📢 Iklan", "🚶 Walk-in", "🧩 6 Pilar", "🤝 Kontribusi MC", "📈 Sales & Marketing",
 ])
 
 with tab1:
@@ -2670,6 +2735,79 @@ with tab6:
             st.markdown("###### 💡 Insight & Rekomendasi")
             for ins in combined_insights[:5]:
                 render_structured_insight_card(ins)
+
+with tab7:
+    st.subheader("📈 Sales & Marketing — Project Tracker")
+    df_projects = _read_projects()
+
+    if not df_projects.empty:
+        total_proj = len(df_projects)
+        selesai_count = int((df_projects["Status"] == "Selesai").sum())
+        berjalan_count = int((df_projects["Status"] == "Berjalan").sum())
+        overdue_count = int(df_projects.apply(_project_is_overdue, axis=1).sum())
+
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.markdown(render_kpi_card("Total Project", format_number(total_proj), "#0f766e", "📋"), unsafe_allow_html=True)
+        with k2:
+            st.markdown(render_kpi_card("Selesai", format_number(selesai_count), "#16a34a", "✅"), unsafe_allow_html=True)
+        with k3:
+            st.markdown(render_kpi_card("Berjalan", format_number(berjalan_count), "#2563eb", "🔄"), unsafe_allow_html=True)
+        with k4:
+            st.markdown(render_kpi_card("Terlambat", format_number(overdue_count), "#dc2626", "⚠️"), unsafe_allow_html=True)
+        st.markdown("<br/>", unsafe_allow_html=True)
+
+        overdue_rows = df_projects[df_projects.apply(_project_is_overdue, axis=1)]
+        if not overdue_rows.empty:
+            st.markdown("###### ⚠️ Project Terlambat")
+            for _, r in overdue_rows.iterrows():
+                st.markdown(
+                    f"""<div style="border-left:4px solid #dc2626;background:#fef2f2;padding:8px 12px;border-radius:6px;margin-bottom:6px;">
+                        <b>{r['Nama Project']}</b> — PIC: {r.get('PIC','-') or '-'} — Due: {r['Due Date']} {render_project_status_badge(str(r['Status']))}
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+            st.markdown("<br/>", unsafe_allow_html=True)
+
+    st.caption("Tambah, edit, atau hapus baris project langsung di tabel ini (klik ➕ di baris terakhir untuk menambah, atau pilih baris lalu tekan Delete). Klik 'Simpan Perubahan' untuk menyimpan permanen.")
+
+    editor_source = df_projects.copy()
+    if editor_source.empty:
+        editor_source = pd.DataFrame([{
+            "Nama Project": "", "Status": "Belum Mulai", "Due Date": date.today(), "PIC": "", "Progress (%)": 0,
+        }])
+
+    edited_projects = st.data_editor(
+        editor_source,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="projects_editor",
+        column_config={
+            "Nama Project": st.column_config.TextColumn("Nama Project", required=True, width="large"),
+            "Status": st.column_config.SelectboxColumn("Status", options=_PROJECT_STATUS_OPTIONS, required=True),
+            "Due Date": st.column_config.DateColumn("Due Date", format="DD/MM/YYYY"),
+            "PIC": st.column_config.TextColumn("PIC"),
+            "Progress (%)": st.column_config.ProgressColumn("Progress (%)", min_value=0, max_value=100, format="%d%%"),
+        },
+    )
+
+    if st.button("💾 Simpan Perubahan", key="btn_save_projects"):
+        clean = edited_projects.dropna(subset=["Nama Project"])
+        clean = clean[clean["Nama Project"].astype(str).str.strip() != ""]
+        _save_projects(clean)
+        st.success("Perubahan project tersimpan.")
+        st.rerun()
+
+    if not df_projects.empty:
+        st.markdown("###### Distribusi Status Project")
+        status_counts = df_projects["Status"].value_counts().reindex(_PROJECT_STATUS_OPTIONS).fillna(0)
+        fig_status = go.Figure(data=[go.Pie(
+            labels=status_counts.index, values=status_counts.values,
+            marker=dict(colors=[_PROJECT_STATUS_COLORS.get(s, "#9ca3af") for s in status_counts.index]),
+            hole=0.45,
+        )])
+        fig_status.update_layout(height=300, margin=dict(t=20, b=10, l=10, r=10))
+        st.plotly_chart(fig_status, use_container_width=True, key="chart_project_status")
 
 st.markdown("---")
 st.subheader("📦 Export Laporan Lengkap")
