@@ -202,7 +202,7 @@ def _cache_paths(name: str):
     return base + ".parquet", base + ".sig"
 
 
-def _load_cached_combined(dir_path: str, cache_name: str):
+def _load_cached_combined(dir_path: str, cache_name: str, required_cols=None):
     """Coba muat DataFrame gabungan dari cache parquet di disk, dipakai supaya
     cold-start (aplikasi baru di-deploy ulang atau bangun dari 'sleep' di
     Streamlit Cloud) tidak perlu mem-parse ulang SEMUA file Excel dari nol tiap
@@ -210,7 +210,12 @@ def _load_cached_combined(dir_path: str, cache_name: str):
     sumber (dideteksi lewat _dir_signature) belum berubah sejak cache terakhir
     dibuat. Beda dengan st.cache_data (yang hilang tiap kali proses Streamlit
     restart), cache ini disimpan di disk (dan di-backup ke GitHub kalau aktif)
-    supaya tetap ada walau aplikasi baru saja restart/cold-start."""
+    supaya tetap ada walau aplikasi baru saja restart/cold-start.
+
+    required_cols: kalau diisi, cache yang skema-nya sudah usang (mis. setelah
+    update app.py menambah kolom baru seperti PilarExcel) otomatis dianggap
+    tidak valid dan di-skip, supaya kolom baru itu tidak hilang gara-gara
+    cache lama yang masih dipakai."""
     parquet_path, sig_path = _cache_paths(cache_name)
     if not (os.path.exists(parquet_path) and os.path.exists(sig_path)):
         return None
@@ -223,9 +228,12 @@ def _load_cached_combined(dir_path: str, cache_name: str):
     if not current_sig or saved_sig != current_sig:
         return None
     try:
-        return pd.read_parquet(parquet_path, engine="pyarrow")
+        df_cached = pd.read_parquet(parquet_path, engine="pyarrow")
     except Exception:
         return None
+    if required_cols and not all(c in df_cached.columns for c in required_cols):
+        return None
+    return df_cached
 
 
 def _save_cached_combined(dir_path: str, cache_name: str, df: pd.DataFrame):
@@ -423,6 +431,21 @@ def _find_pilar_column_index(col_idx: dict):
             return idx
     for header, idx in col_idx.items():
         if "PILAR" in header:
+            return idx
+    return None
+
+
+def _find_pilar_excel_column_index(col_idx: dict):
+    """Cari kolom 'KATEGORI PILAR ...' asli dari Excel secara KHUSUS (terpisah
+    dari KATEGORI BARANG), dipakai sebagai sumber klasifikasi 6 Pilar
+    ALTERNATIF supaya bisa dibandingkan/cross-check dengan versi Kategori
+    Barang. Catatan: kolom ini di data asli sering kosong untuk sebagian
+    transaksi, jadi hasilnya bisa kurang lengkap dibanding Kategori Barang."""
+    for header, idx in col_idx.items():
+        if header == "KATEGORI PILAR" or header == "PILAR":
+            return idx
+    for header, idx in col_idx.items():
+        if "PILAR" in header and "BARANG" not in header:
             return idx
     return None
 
@@ -628,6 +651,7 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
     idx_qty = gi("QTY")
     idx_gp = gi("GROSS PROFIT")
     idx_pilar = _find_pilar_column_index(col_idx)
+    idx_pilar_excel = _find_pilar_excel_column_index(col_idx)
     idx_penjual = _find_penjual_column_index(col_idx)
 
     cabang_fallback = cabang_hint or branch_from_filename(os.path.basename(path)) or branch_from_sheetname(sheet_name)
@@ -645,6 +669,7 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
         kategori_raw = _nan_to_none(row[idx_kategori]) if idx_kategori is not None and idx_kategori < len(row) else None
         kategori_pelanggan_raw = _nan_to_none(row[idx_kategori_pelanggan]) if idx_kategori_pelanggan is not None and idx_kategori_pelanggan < len(row) else None
         pilar_raw = _nan_to_none(row[idx_pilar]) if idx_pilar is not None and idx_pilar < len(row) else None
+        pilar_excel_raw = _nan_to_none(row[idx_pilar_excel]) if idx_pilar_excel is not None and idx_pilar_excel < len(row) else None
         penjual_raw = _nan_to_none(row[idx_penjual]) if idx_penjual is not None and idx_penjual < len(row) else None
         qty = _to_float_or_none(row[idx_qty]) if idx_qty is not None and idx_qty < len(row) else 0.0
         gp = _to_float_or_none(row[idx_gp]) if idx_gp is not None and idx_gp < len(row) else 0.0
@@ -656,6 +681,7 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
             "Qty": qty or 0.0,
             "GrossProfit": gp or 0.0,
             "Pilar": classify_pilar(pilar_raw),
+            "PilarExcel": classify_pilar(pilar_excel_raw),
             "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "TIDAK DIKETAHUI",
             "PenjualKelompok": classify_mc_or_retail(kategori_pelanggan_raw),
         })
@@ -699,6 +725,7 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
     idx_qty = gi("QTY")
     idx_gp = gi("GROSS PROFIT")
     idx_pilar = _find_pilar_column_index(col_idx)
+    idx_pilar_excel = _find_pilar_excel_column_index(col_idx)
     idx_penjual = _find_penjual_column_index(col_idx)
 
     records = []
@@ -714,6 +741,7 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
         kategori_raw = _nan_to_none(row[idx_kategori]) if idx_kategori is not None and idx_kategori < len(row) else None
         kategori_pelanggan_raw = _nan_to_none(row[idx_kategori_pelanggan]) if idx_kategori_pelanggan is not None and idx_kategori_pelanggan < len(row) else None
         pilar_raw = _nan_to_none(row[idx_pilar]) if idx_pilar is not None and idx_pilar < len(row) else None
+        pilar_excel_raw = _nan_to_none(row[idx_pilar_excel]) if idx_pilar_excel is not None and idx_pilar_excel < len(row) else None
         penjual_raw = _nan_to_none(row[idx_penjual]) if idx_penjual is not None and idx_penjual < len(row) else None
         qty = _to_float_or_none(row[idx_qty]) if idx_qty is not None and idx_qty < len(row) else 0.0
         gp = _to_float_or_none(row[idx_gp]) if idx_gp is not None and idx_gp < len(row) else 0.0
@@ -725,6 +753,7 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
             "Qty": qty or 0.0,
             "GrossProfit": gp or 0.0,
             "Pilar": classify_pilar(pilar_raw),
+            "PilarExcel": classify_pilar(pilar_excel_raw),
             "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "TIDAK DIKETAHUI",
             "PenjualKelompok": classify_mc_or_retail(kategori_pelanggan_raw),
         })
@@ -781,7 +810,7 @@ def _dedupe_main_files():
 def load_all_main_data() -> pd.DataFrame:
     if not os.path.isdir(MAIN_DATA_DIR):
         return pd.DataFrame()
-    cached = _load_cached_combined(MAIN_DATA_DIR, "main_combined")
+    cached = _load_cached_combined(MAIN_DATA_DIR, "main_combined", required_cols=["Pilar", "PilarExcel"])
     if cached is not None:
         return cached
     frames = []
@@ -1699,29 +1728,33 @@ def render_daily_history_chart(df_daily: pd.DataFrame, title="Riwayat Pencapaian
 
 # ========================= 6 Pilar aggregation/render =========================
 
-def build_pilar_summary(df_main: pd.DataFrame, branches, tanggal_acuan: date) -> pd.DataFrame:
-    if df_main.empty:
+def build_pilar_summary(df_main: pd.DataFrame, branches, tanggal_acuan: date, pilar_col: str = "Pilar") -> pd.DataFrame:
+    """pilar_col: 'Pilar' (default, dari KATEGORI BARANG - data lengkap) atau
+    'PilarExcel' (dari kolom KATEGORI PILAR asli Excel - untuk cross-check)."""
+    if df_main.empty or pilar_col not in df_main.columns:
         return pd.DataFrame(columns=["Pilar", "Omset", "Qty"])
     start, end, _, _, _ = _quarter_bounds(tanggal_acuan)
     sub = df_main[df_main["Cabang"].isin(branches)]
     sub = sub[(sub["Tanggal"] >= start) & (sub["Tanggal"] <= tanggal_acuan)]
     if sub.empty:
         return pd.DataFrame(columns=["Pilar", "Omset", "Qty"])
-    g = sub.groupby("Pilar").agg(Omset=("Omset", "sum"), Qty=("Qty", "sum")).reset_index()
+    g = sub.groupby(pilar_col).agg(Omset=("Omset", "sum"), Qty=("Qty", "sum")).reset_index()
+    g = g.rename(columns={pilar_col: "Pilar"})
     g["_rank"] = g["Pilar"].apply(lambda p: PILAR_ORDER.index(p) if p in PILAR_ORDER else 999)
     g = g.sort_values("_rank").drop(columns=["_rank"])
     return g
 
 
-def build_pilar_by_branch(df_main: pd.DataFrame, branches, tanggal_acuan: date) -> pd.DataFrame:
-    if df_main.empty:
+def build_pilar_by_branch(df_main: pd.DataFrame, branches, tanggal_acuan: date, pilar_col: str = "Pilar") -> pd.DataFrame:
+    if df_main.empty or pilar_col not in df_main.columns:
         return pd.DataFrame(columns=["Cabang", "Pilar", "Omset", "Qty"])
     start, end, _, _, _ = _quarter_bounds(tanggal_acuan)
     sub = df_main[df_main["Cabang"].isin(branches)]
     sub = sub[(sub["Tanggal"] >= start) & (sub["Tanggal"] <= tanggal_acuan)]
     if sub.empty:
         return pd.DataFrame(columns=["Cabang", "Pilar", "Omset", "Qty"])
-    g = sub.groupby(["Cabang", "Pilar"]).agg(Omset=("Omset", "sum"), Qty=("Qty", "sum")).reset_index()
+    g = sub.groupby(["Cabang", pilar_col]).agg(Omset=("Omset", "sum"), Qty=("Qty", "sum")).reset_index()
+    g = g.rename(columns={pilar_col: "Pilar"})
     return g
 
 
@@ -2636,11 +2669,36 @@ with tab4:
 
 with tab5:
     st.subheader(f"🧩 6 Pilar MFlash — {quarter_period_label}")
-    if pilar_summary.empty:
+
+    pilar_source_label = st.radio(
+        "Sumber klasifikasi 6 Pilar",
+        options=["KATEGORI BARANG (Rekomendasi)", "KATEGORI PILAR (kolom Excel)"],
+        horizontal=True,
+        key="pilar_source_tab5",
+    )
+    if pilar_source_label.startswith("KATEGORI PILAR"):
+        pilar_col_selected = "PilarExcel"
+        n_kosong = int((df_main["PilarExcel"] == "Lainnya").sum()) if "PilarExcel" in df_main.columns and not df_main.empty else 0
+        n_total = len(df_main) if not df_main.empty else 0
+        st.caption(
+            "⚠️ Menampilkan klasifikasi berdasarkan kolom **KATEGORI PILAR** asli di file Excel. "
+            "Kolom ini sering kosong untuk sebagian transaksi di file ekspor MFlash — baris yang kosong "
+            "otomatis dihitung sebagai 'Lainnya', jadi hasilnya bisa kurang lengkap dibanding KATEGORI BARANG. "
+            + (f"({n_kosong:,}".replace(",", ".") + f" dari {n_total:,}".replace(",", ".") + " baris masuk 'Lainnya'.)" if n_total else "")
+        )
+        pilar_summary_disp = build_pilar_summary(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
+        pilar_by_branch_disp = build_pilar_by_branch(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
+    else:
+        pilar_col_selected = "Pilar"
+        st.caption("Menampilkan klasifikasi berdasarkan kolom **KATEGORI BARANG** (terisi penuh di setiap transaksi).")
+        pilar_summary_disp = pilar_summary
+        pilar_by_branch_disp = pilar_by_branch
+
+    if pilar_summary_disp.empty:
         st.info("Belum ada data 6 Pilar untuk periode ini.")
     else:
-        cols_pilar = st.columns(len(pilar_summary))
-        for i, (_, r) in enumerate(pilar_summary.iterrows()):
+        cols_pilar = st.columns(len(pilar_summary_disp))
+        for i, (_, r) in enumerate(pilar_summary_disp.iterrows()):
             with cols_pilar[i]:
                 st.markdown(render_pilar_kpi_card(r["Pilar"], r["Omset"], r["Qty"]), unsafe_allow_html=True)
 
@@ -2648,20 +2706,20 @@ with tab5:
         cpi1, cpi2 = st.columns([1, 1])
         with cpi1:
             fig_pilar2 = render_contribution_pie(
-                [_pilar_label(p) for p in pilar_summary["Pilar"]],
-                pilar_summary["Omset"],
-                [PILAR_COLORS.get(p, "#9ca3af") for p in pilar_summary["Pilar"]],
+                [_pilar_label(p) for p in pilar_summary_disp["Pilar"]],
+                pilar_summary_disp["Omset"],
+                [PILAR_COLORS.get(p, "#9ca3af") for p in pilar_summary_disp["Pilar"]],
                 title="Kontribusi Omset per Pilar",
             )
             st.plotly_chart(fig_pilar2, use_container_width=True, key="chart_pilar_tab5")
         with cpi2:
             st.markdown("###### Ringkasan per Pilar")
-            st.markdown(render_pilar_table_html(pilar_summary), unsafe_allow_html=True)
+            st.markdown(render_pilar_table_html(pilar_summary_disp), unsafe_allow_html=True)
 
         st.markdown("###### Detail per Cabang")
-        st.markdown(render_pilar_summary_table_html(pilar_by_branch), unsafe_allow_html=True)
+        st.markdown(render_pilar_summary_table_html(pilar_by_branch_disp), unsafe_allow_html=True)
 
-        pilar_insights = generate_pilar_insights(pilar_summary)
+        pilar_insights = generate_pilar_insights(pilar_summary_disp)
         if pilar_insights:
             st.markdown("###### 💡 Insight & Rekomendasi")
             for ins in pilar_insights[:5]:
