@@ -404,6 +404,20 @@ def _pilar_label(p: str) -> str:
 
 
 def _find_pilar_column_index(col_idx: dict):
+    """Cari kolom sumber klasifikasi 6 Pilar MFlash.
+    Prioritas utama: 'KATEGORI BARANG' - kolom ini SELALU terisi penuh di file
+    ekspor asli (AKSESORIS, JASA, SPAREPART, HANDPHONE, LAPTOP, KARTU PERDANA,
+    dst) untuk setiap baris transaksi. Kolom 'KATEGORI PILAR ...' yang tadinya
+    dipakai ternyata sering kosong/NaN (di sample data hanya ~40% baris yang
+    terisi, dan nilainya pun beda konsep - SERVICE/PENJUALAN RITEL/PENGADAAN
+    CORPORATE, bukan 6 kategori Pilar) - itu sebabnya sebelumnya 6 Pilar cuma
+    kebaca 'Service' dan 'Lainnya' saja (mayoritas baris NaN -> default Lainnya)."""
+    for header, idx in col_idx.items():
+        if header == "KATEGORI BARANG":
+            return idx
+    for header, idx in col_idx.items():
+        if "KATEGORI BARANG" in header:
+            return idx
     for header, idx in col_idx.items():
         if header == "KATEGORI PILAR" or header == "PILAR":
             return idx
@@ -414,18 +428,20 @@ def _find_pilar_column_index(col_idx: dict):
 
 
 def classify_pilar(v) -> str:
+    """Klasifikasi 6 Pilar MFlash dari nilai kolom KATEGORI BARANG (utama) atau
+    KATEGORI PILAR (fallback jika KATEGORI BARANG tidak ada di file)."""
     if not v:
         return "Lainnya"
     up = str(v).strip().upper()
-    if "HANDPHONE" in up or "HP" == up:
+    if "HANDPHONE" in up or up == "HP":
         return "Handphone"
     if "LAPTOP" in up:
         return "Laptop"
     if "AKSESORIS" in up or "ACCESSORIES" in up:
         return "Aksesoris"
-    if "VOUCHER" in up or "PERDANA" in up:
+    if "PERDANA" in up or "VOUCHER" in up or "KARTU" in up:
         return "Voucher & Perdana"
-    if "SERVICE" in up or "JASA" in up or "SPAREPART" in up:
+    if "JASA" in up or "SPAREPART" in up or "SERVICE" in up:
         return "Service"
     return "Lainnya"
 
@@ -928,11 +944,13 @@ def render_structured_insight_card(ins: dict):
     color = colors.get(level, "#2563eb")
     icon = icons.get(level, "ℹ️")
     st.markdown(
-        f"""<div style="background:white;border-left:4px solid {color};border-radius:8px;
-        padding:12px 16px;margin-bottom:10px;box-shadow:0 1px 2px rgba(0,0,0,0.06);">
-        <div style="font-weight:700;color:{color};">{icon} {ins.get('title','')}</div>
-        <div style="color:#374151;font-size:0.92em;margin-top:4px;">{ins.get('detail','')}</div>
-        </div>""",
+        (
+            f'<div style="background:white;border-left:4px solid {color};border-radius:8px;'
+            f'padding:12px 16px;margin-bottom:10px;box-shadow:0 1px 2px rgba(0,0,0,0.06);">'
+            f'<div style="font-weight:700;color:{color};">{icon} {ins.get("title","")}</div>'
+            f'<div style="color:#374151;font-size:0.92em;margin-top:4px;">{ins.get("detail","")}</div>'
+            f'</div>'
+        ),
         unsafe_allow_html=True,
     )
 
@@ -965,12 +983,14 @@ def generate_all_sales_insights(df: pd.DataFrame):
 
 
 def render_kpi_card(title: str, value: str, color: str, icon: str = "") -> str:
-    return f"""<div style="background:white;border:2px solid {color};border-radius:14px;
-    padding:20px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-    <div style="font-size:1.6em;">{icon}</div>
-    <div style="color:{color};font-weight:700;font-size:0.95em;margin-top:6px;">{title}</div>
-    <div style="font-size:1.5em;font-weight:800;color:#111827;margin-top:4px;">{value}</div>
-    </div>"""
+    return (
+        f'<div style="background:white;border:2px solid {color};border-radius:14px;'
+        f'padding:20px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.08);">'
+        f'<div style="font-size:1.6em;">{icon}</div>'
+        f'<div style="color:{color};font-weight:700;font-size:0.95em;margin-top:6px;">{title}</div>'
+        f'<div style="font-size:1.5em;font-weight:800;color:#111827;margin-top:4px;">{value}</div>'
+        f'</div>'
+    )
 
 # ========================= Loader Data Walk-in =========================
 
@@ -1722,16 +1742,23 @@ def generate_pilar_insights(df_summary: pd.DataFrame):
 
 
 def render_pilar_kpi_card(pilar: str, omset: float, qty: float) -> str:
+    # PENTING: HTML digabung jadi SATU baris tanpa newline/indentasi - kalau
+    # multi-baris berindentasi, parser Markdown Streamlit bisa salah mengira
+    # sebagian baris itu code block, sehingga tag penutup </div> muncul sebagai
+    # teks mentah dan kartu tidak ter-render dengan benar (ini penyebab bug
+    # "</div>" muncul sebagai teks di kartu 6 Pilar).
     color = PILAR_COLORS.get(pilar, "#6b7280")
     icon = PILAR_ICONS.get(pilar, "📦")
     qty_html = f"<div style='color:#6b7280;font-size:0.8em;margin-top:2px;'>{format_number(qty)} unit</div>" if pilar in _PILAR_SHOW_QTY else ""
-    return f"""<div style="background:white;border-top:4px solid {color};border-radius:10px;
-    padding:14px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-    <div style="font-size:1.4em;">{icon}</div>
-    <div style="color:{color};font-weight:700;font-size:0.85em;margin-top:4px;">{_pilar_label(pilar)}</div>
-    <div style="font-size:1.1em;font-weight:800;color:#111827;margin-top:2px;">{format_rupiah(omset)}</div>
-    {qty_html}
-    </div>"""
+    return (
+        f'<div style="background:white;border-top:4px solid {color};border-radius:10px;'
+        f'padding:14px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.08);">'
+        f'<div style="font-size:1.4em;">{icon}</div>'
+        f'<div style="color:{color};font-weight:700;font-size:0.85em;margin-top:4px;">{_pilar_label(pilar)}</div>'
+        f'<div style="font-size:1.1em;font-weight:800;color:#111827;margin-top:2px;">{format_rupiah(omset)}</div>'
+        f'{qty_html}'
+        f'</div>'
+    )
 
 
 def render_pilar_table_html(df_summary: pd.DataFrame) -> str:
@@ -1820,13 +1847,15 @@ def render_mc_contribution_card(kelompok: str, omset: float, total: float) -> st
     pct = (omset / total) if total else 0.0
     color = "#7c3aed" if kelompok == "Marketing Corporate" else "#059669"
     icon = "🤝" if kelompok == "Marketing Corporate" else "🏪"
-    return f"""<div style="background:white;border-top:4px solid {color};border-radius:10px;
-    padding:16px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
-    <div style="font-size:1.6em;">{icon}</div>
-    <div style="color:{color};font-weight:700;margin-top:4px;">{kelompok}</div>
-    <div style="font-size:1.2em;font-weight:800;color:#111827;margin-top:2px;">{format_rupiah(omset)}</div>
-    <div style="color:#6b7280;font-size:0.85em;margin-top:2px;">{format_percent(pct)} dari total</div>
-    </div>"""
+    return (
+        f'<div style="background:white;border-top:4px solid {color};border-radius:10px;'
+        f'padding:16px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.08);">'
+        f'<div style="font-size:1.6em;">{icon}</div>'
+        f'<div style="color:{color};font-weight:700;margin-top:4px;">{kelompok}</div>'
+        f'<div style="font-size:1.2em;font-weight:800;color:#111827;margin-top:2px;">{format_rupiah(omset)}</div>'
+        f'<div style="color:#6b7280;font-size:0.85em;margin-top:2px;">{format_percent(pct)} dari total</div>'
+        f'</div>'
+    )
 
 
 def render_mc_split_donut(df_summary: pd.DataFrame):
@@ -2694,11 +2723,13 @@ with tab7:
     for col, (label, val, color) in zip(kpi_cols, kpi_specs):
         with col:
             st.markdown(
-                f"""<div style="background:white;border-radius:12px;padding:16px;
-                border-left:5px solid {color};box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-                <div style="color:#6b7280;font-size:0.85em;font-weight:600;">{label}</div>
-                <div style="color:{color};font-size:1.8em;font-weight:800;">{val}</div>
-                </div>""",
+                (
+                    f'<div style="background:white;border-radius:12px;padding:16px;'
+                    f'border-left:5px solid {color};box-shadow:0 1px 3px rgba(0,0,0,0.1);">'
+                    f'<div style="color:#6b7280;font-size:0.85em;font-weight:600;">{label}</div>'
+                    f'<div style="color:{color};font-size:1.8em;font-weight:800;">{val}</div>'
+                    f'</div>'
+                ),
                 unsafe_allow_html=True,
             )
 
@@ -2712,11 +2743,13 @@ with tab7:
             for _, r in overdue_rows.iterrows()
         )
         st.markdown(
-            f"""<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;
-            padding:14px 18px;margin-top:8px;">
-            <b style="color:#b91c1c;">⚠️ {terlambat_proj} Project Terlambat</b>
-            <ul style="margin:8px 0 0 0;">{overdue_items}</ul>
-            </div>""",
+            (
+                f'<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;'
+                f'padding:14px 18px;margin-top:8px;">'
+                f'<b style="color:#b91c1c;">⚠️ {terlambat_proj} Project Terlambat</b>'
+                f'<ul style="margin:8px 0 0 0;">{overdue_items}</ul>'
+                f'</div>'
+            ),
             unsafe_allow_html=True,
         )
 
