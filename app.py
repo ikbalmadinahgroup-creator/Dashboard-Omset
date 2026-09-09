@@ -2678,14 +2678,32 @@ with tab5:
     )
     if pilar_source_label.startswith("KATEGORI PILAR"):
         pilar_col_selected = "PilarExcel"
-        n_kosong = int((df_main["PilarExcel"] == "Lainnya").sum()) if "PilarExcel" in df_main.columns and not df_main.empty else 0
-        n_total = len(df_main) if not df_main.empty else 0
-        st.caption(
-            "⚠️ Menampilkan klasifikasi berdasarkan kolom **KATEGORI PILAR** asli di file Excel. "
-            "Kolom ini sering kosong untuk sebagian transaksi di file ekspor MFlash — baris yang kosong "
-            "otomatis dihitung sebagai 'Lainnya', jadi hasilnya bisa kurang lengkap dibanding KATEGORI BARANG. "
-            + (f"({n_kosong:,}".replace(",", ".") + f" dari {n_total:,}".replace(",", ".") + " baris masuk 'Lainnya'.)" if n_total else "")
+        # Kolom KATEGORI PILAR baru mulai dipakai sistem MFlash sejak awal
+        # Agustus 2026 (info dari user) - jadi transaksi SEBELUM tanggal itu
+        # WAJAR kosong (bukan masalah data). Yang perlu diperhatikan hanya
+        # transaksi Agustus-dst yang masih kosong.
+        KATEGORI_PILAR_START = date(2026, 8, 1)
+        if not df_main.empty and "PilarExcel" in df_main.columns:
+            before_mask = df_main["Tanggal"] < KATEGORI_PILAR_START
+            after_mask = ~before_mask
+            n_before = int(before_mask.sum())
+            n_after = int(after_mask.sum())
+            n_after_kosong = int((df_main.loc[after_mask, "PilarExcel"] == "Lainnya").sum()) if n_after else 0
+        else:
+            n_before = n_after = n_after_kosong = 0
+        caption_txt = (
+            "Menampilkan klasifikasi berdasarkan kolom **KATEGORI PILAR** asli di file Excel. "
+            "Kolom ini baru mulai diisi sistem MFlash sejak awal Agustus 2026, jadi transaksi sebelum "
+            "tanggal itu wajar tidak punya nilai (otomatis masuk 'Lainnya') — bukan masalah data."
         )
+        if n_before:
+            caption_txt += f" ({format_number(n_before)} transaksi sebelum Agustus 2026 termasuk dalam hitungan ini.)"
+        st.caption(caption_txt)
+        if n_after and n_after_kosong:
+            st.caption(
+                f"ℹ️ Untuk transaksi Agustus 2026 ke atas: {format_number(n_after_kosong)} dari "
+                f"{format_number(n_after)} baris masih belum ada nilai KATEGORI PILAR-nya."
+            )
         pilar_summary_disp = build_pilar_summary(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
         pilar_by_branch_disp = build_pilar_by_branch(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
     else:
