@@ -2047,21 +2047,35 @@ def render_project_progress_bar(row) -> str:
         notes_html += f"<div style='margin-top:2px;'><b style='color:#374151;'>📝 Catatan:</b> {catatan}</div>"
     if action_plan:
         notes_html += f"<div style='margin-top:2px;'><b style='color:#0f766e;'>🎯 Action Plan:</b> {action_plan}</div>"
-    return f"""<div style="background:white;border-radius:10px;padding:14px 16px;margin-bottom:10px;
-    box-shadow:0 1px 3px rgba(0,0,0,0.08);border-left:4px solid {color};">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;">
-    <b style="color:#111827;">{nama}</b>
-    <span style="color:#6b7280;font-size:0.85em;">PIC: {pic} · Due: {due_str}</span>
-    </div>
-    <div style="background:#f3f4f6;border-radius:8px;height:14px;margin-top:8px;overflow:hidden;">
-    <div style="background:{color};width:{pct:.0f}%;height:100%;border-radius:8px;transition:width 0.3s;"></div>
-    </div>
-    <div style="display:flex;justify-content:space-between;margin-top:4px;">
-    <span style="color:{color};font-weight:700;font-size:0.85em;">{pct:.0f}%</span>
-    {render_project_status_badge(status)}
-    </div>
-    {notes_html}
-    </div>"""
+    # PENTING: seluruh HTML digabung jadi SATU baris tanpa newline/indentasi.
+    # Kalau ditulis multi-baris dengan indentasi (spasi di depan tiap baris),
+    # parser Markdown Streamlit bisa salah mengira sebagian baris itu sebagai
+    # code block, sehingga tag penutup </div> muncul sebagai teks mentah dan
+    # bar isian tidak ter-render (ini yang menyebabkan bar kosong + "</div>"
+    # muncul sebagai teks di bawah progress bar).
+    header_html = (
+        f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;">'
+        f'<b style="color:#111827;">{nama}</b>'
+        f'<span style="color:#6b7280;font-size:0.85em;">PIC: {pic} · Due: {due_str}</span>'
+        f'</div>'
+    )
+    track_html = (
+        f'<div style="background:#f3f4f6;border-radius:8px;height:14px;margin-top:8px;overflow:hidden;">'
+        f'<div style="background:{color};width:{pct:.0f}%;height:100%;border-radius:8px;"></div>'
+        f'</div>'
+    )
+    footer_html = (
+        f'<div style="display:flex;justify-content:space-between;margin-top:4px;">'
+        f'<span style="color:{color};font-weight:700;font-size:0.85em;">{pct:.0f}%</span>'
+        f'{render_project_status_badge(status)}'
+        f'</div>'
+    )
+    return (
+        f'<div style="background:white;border-radius:10px;padding:14px 16px;margin-bottom:10px;'
+        f'box-shadow:0 1px 3px rgba(0,0,0,0.08);border-left:4px solid {color};">'
+        f'{header_html}{track_html}{footer_html}{notes_html}'
+        f'</div>'
+    )
 
 
 # ========================= PPTX/PDF export machinery =========================
@@ -2371,9 +2385,10 @@ all_branches_available = order_branches(df_main["Cabang"].unique()) if not df_ma
 
 filt_col1, filt_col2 = st.columns([1, 3])
 with filt_col1:
-    default_date = df_main["Tanggal"].max() if not df_main.empty and df_main["Tanggal"].notna().any() else date.today()
-    if default_date is None:
-        default_date = date.today()
+    # Default ke tanggal HARI INI (kalender asli) supaya % Pencapaian otomatis
+    # ter-update mengikuti sisa hari kuartal setiap hari dashboard dibuka -
+    # tidak tergantung tanggal terakhir file Omset yang di-upload.
+    default_date = date.today()
     tanggal_acuan = st.date_input("📅 Tanggal Acuan", value=default_date)
 with filt_col2:
     selected_branches = st.multiselect("🏢 Filter Cabang", options=all_branches_available, default=all_branches_available)
