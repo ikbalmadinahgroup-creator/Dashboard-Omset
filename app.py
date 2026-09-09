@@ -17,6 +17,19 @@ akurat. Loader Iklan mem-buang kolom duplikat sebelum digabung
 (pd.concat) untuk mencegah pandas.errors.InvalidIndexError. Tab
 Sales & Marketing berisi project tracker interaktif (tambah/edit/hapus
 baris langsung di dashboard) dengan status, due date, PIC, dan progress.
+Loader per-file di-cache (st.cache_data, key = path+mtime+size) supaya
+file Excel yang belum berubah tidak dibaca ulang setiap kali ada
+interaksi di dashboard (setiap klik/filter membuat Streamlit menjalankan
+ulang seluruh script). Selain itu, hasil gabungan semua file Omset/Iklan/
+Walk-in juga disimpan sebagai cache parquet di disk (+ backup ke GitHub
+kalau aktif) yang tetap ada walau aplikasi baru saja restart/"bangun
+tidur" di Streamlit Cloud — ini fix utama untuk keluhan loading lambat
+saat cold-start, karena tanpa cache ini SEMUA file Excel per cabang harus
+dibaca ulang dari nol tiap kali proses Streamlit baru dimulai (bisa
+puluhan detik untuk 18 cabang), padahal baca cache parquet hanya makan
+waktu di bawah 0,1 detik selama file Excel sumber belum berubah.
+Log riwayat & backup GitHub juga hanya jalan saat data benar-benar
+berubah, bukan di setiap rerun.
 """
 
 import base64
@@ -187,12 +200,89 @@ def sync_data_from_github():
     for remote_dir, local_dir in [
         ("data/main", "data/main"), ("data/ads", "data/ads"), ("data/walkin", "data/walkin"),
         ("data/target", "data/target"), ("data/corp", "data/corp"), ("data/log", "data/log"),
-        ("data/projects", "data/projects"),
+        ("data/projects", "data/projects"), ("data/_cache", "data/_cache"),
     ]:
         for fname in github_list_dir(remote_dir):
             local_path = os.path.join(local_dir, fname)
             if not os.path.exists(local_path):
                 github_download_file(f"{remote_dir}/{fname}", local_path)
+
+
+# ========================= Cache helpers =========================
+
+def _dir_signature(dir_path: str) -> str:
+    """Signature ringan dari isi folder (nama file + waktu ubah + ukuran), dipakai
+    untuk mendeteksi apakah data benar-benar berubah (untuk gating log/backup),
+    tanpa perlu baca isi file."""
+    if not os.path.isdir(dir_path):
+        return ""
+    parts = []
+    for fname in sorted(os.listdir(dir_path)):
+        fpath = os.path.join(dir_path, fname)
+        try:
+            st_ = os.stat(fpath)
+            parts.append(f"{fname}:{st_.st_mtime}:{st_.st_size}")
+        except OSError:
+            continue
+    return "|".join(parts)
+
+
+CACHE_DATA_DIR = os.path.join("data", "_cache")
+
+
+def _cache_paths(name: str):
+    base = os.path.join(CACHE_DATA_DIR, name)
+    return base + ".parquet", base + ".sig"
+
+
+def _load_cached_combined(dir_path: str, cache_name: str):
+    """Coba muat DataFrame gabungan dari cache parquet di disk, dipakai supaya
+    cold-start (aplikasi baru di-deploy ulang atau bangun dari 'sleep' di
+    Streamlit Cloud) tidak perlu mem-parse ulang SEMUA file Excel dari nol tiap
+    kali - cukup baca file parquet yang jauh lebih cepat (bisa >1000x lebih
+    cepat dibanding baca ulang puluhan file Excel), selama isi folder sumber
+    (dideteksi lewat _dir_signature) belum berubah sejak cache terakhir dibuat.
+    Beda dengan st.cache_data (yang hilang tiap kali proses Streamlit restart),
+    cache ini disimpan di disk (dan di-backup ke GitHub kalau aktif) supaya
+    tetap ada walau aplikasi baru saja restart/cold-start."""
+    parquet_path, sig_path = _cache_paths(cache_name)
+    if not (os.path.exists(parquet_path) and os.path.exists(sig_path)):
+        return None
+    try:
+        with open(sig_path, "r") as f:
+            saved_sig = f.read().strip()
+    except Exception:
+        return None
+    current_sig = _dir_signature(dir_path)
+    if not current_sig or saved_sig != current_sig:
+        return None
+    try:
+        return pd.read_parquet(parquet_path, engine="pyarrow")
+    except Exception:
+        return None
+
+
+def _save_cached_combined(dir_path: str, cache_name: str, df: pd.DataFrame):
+    """Simpan DataFrame gabungan ke cache parquet di disk (+ backup ke GitHub
+    kalau aktif) supaya cold-start berikutnya bisa langsung pakai cache ini
+    selama file Excel sumber belum berubah."""
+    if df is None or df.empty:
+        return
+    parquet_path, sig_path = _cache_paths(cache_name)
+    try:
+        os.makedirs(CACHE_DATA_DIR, exist_ok=True)
+        df.to_parquet(parquet_path, engine="pyarrow", index=False)
+        sig = _dir_signature(dir_path)
+        with open(sig_path, "w") as f:
+            f.write(sig)
+        if _GH_ENABLED:
+            try:
+                github_upload_file(f"data/_cache/{os.path.basename(parquet_path)}", open(parquet_path, "rb").read())
+                github_upload_file(f"data/_cache/{os.path.basename(sig_path)}", open(sig_path, "rb").read())
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # ========================= Constants =========================
 
@@ -664,6 +754,14 @@ def load_main_data(path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False)
+def _load_main_data_cached(path: str, mtime: float, size: int) -> pd.DataFrame:
+    """Wrapper cache: file Excel yang sama (path+mtime+size tidak berubah) tidak
+    akan dibaca & diparse ulang setiap kali Streamlit rerun script (setiap ada
+    interaksi seperti ganti tanggal/filter/klik tombol)."""
+    return load_main_data(path)
+
+
 def _dedupe_main_files():
     """Hapus file Omset duplikat/basi per cabang, sisakan yang timestamp-nya terbaru."""
     if not os.path.isdir(MAIN_DATA_DIR):
@@ -692,13 +790,17 @@ def _dedupe_main_files():
 def load_all_main_data() -> pd.DataFrame:
     if not os.path.isdir(MAIN_DATA_DIR):
         return pd.DataFrame()
+    cached = _load_cached_combined(MAIN_DATA_DIR, "main_combined")
+    if cached is not None:
+        return cached
     frames = []
     for fname in sorted(os.listdir(MAIN_DATA_DIR)):
         if not fname.lower().endswith((".xlsx", ".xls")):
             continue
         fpath = os.path.join(MAIN_DATA_DIR, fname)
         try:
-            df = load_main_data(fpath)
+            stat_ = os.stat(fpath)
+            df = _load_main_data_cached(fpath, stat_.st_mtime, stat_.st_size)
             if not df.empty:
                 frames.append(df)
         except Exception:
@@ -709,6 +811,7 @@ def load_all_main_data() -> pd.DataFrame:
     combined["Tahun"] = combined["Tanggal"].apply(lambda d: d.year if d else None)
     combined["Bulan"] = combined["Tanggal"].apply(lambda d: d.month if d else None)
     combined = combined.dropna(subset=["Cabang", "Tanggal"])
+    _save_cached_combined(MAIN_DATA_DIR, "main_combined", combined)
     return combined
 
 
@@ -773,16 +876,25 @@ def load_ads_data(path: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False)
+def _load_ads_data_cached(path: str, mtime: float, size: int) -> pd.DataFrame:
+    return load_ads_data(path)
+
+
 def load_all_ads_data() -> pd.DataFrame:
     if not os.path.isdir(ADS_DATA_DIR):
         return pd.DataFrame()
+    cached = _load_cached_combined(ADS_DATA_DIR, "ads_combined")
+    if cached is not None:
+        return cached
     frames = []
     for fname in sorted(os.listdir(ADS_DATA_DIR)):
         if not fname.lower().endswith((".xlsx", ".xls", ".csv")):
             continue
         fpath = os.path.join(ADS_DATA_DIR, fname)
         try:
-            df = load_ads_data(fpath)
+            stat_ = os.stat(fpath)
+            df = _load_ads_data_cached(fpath, stat_.st_mtime, stat_.st_size)
             if df is not None and not df.empty:
                 frames.append(_dedupe_columns(df))
         except Exception:
@@ -790,7 +902,7 @@ def load_all_ads_data() -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     try:
-        return pd.concat(frames, ignore_index=True, sort=False)
+        result = pd.concat(frames, ignore_index=True, sort=False)
     except Exception:
         keep_cols = ["Cabang", "CampaignName", "AmountSpent", "Reach", "Impressions",
                      "Clicks", "CPM", "CPC", "CTR", "Results"]
@@ -799,7 +911,9 @@ def load_all_ads_data() -> pd.DataFrame:
             f = _dedupe_columns(f)
             cols_present = [c for c in keep_cols if c in f.columns]
             cleaned.append(f[cols_present])
-        return pd.concat(cleaned, ignore_index=True, sort=False)
+        result = pd.concat(cleaned, ignore_index=True, sort=False)
+    _save_cached_combined(ADS_DATA_DIR, "ads_combined", result)
+    return result
 
 
 def aggregate_ads_by_branch(df: pd.DataFrame) -> pd.DataFrame:
@@ -1018,16 +1132,25 @@ def load_walkin_data(path: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(show_spinner=False)
+def _load_walkin_data_cached(path: str, mtime: float, size: int) -> pd.DataFrame:
+    return load_walkin_data(path)
+
+
 def load_all_walkin_data() -> pd.DataFrame:
     if not os.path.isdir(WALKIN_DATA_DIR):
         return pd.DataFrame()
+    cached = _load_cached_combined(WALKIN_DATA_DIR, "walkin_combined")
+    if cached is not None:
+        return cached
     frames = []
     for fname in sorted(os.listdir(WALKIN_DATA_DIR)):
         if not fname.lower().endswith((".xlsx", ".xls")):
             continue
         fpath = os.path.join(WALKIN_DATA_DIR, fname)
         try:
-            df = load_walkin_data(fpath)
+            stat_ = os.stat(fpath)
+            df = _load_walkin_data_cached(fpath, stat_.st_mtime, stat_.st_size)
             if not df.empty:
                 frames.append(df)
         except Exception:
@@ -1037,6 +1160,7 @@ def load_all_walkin_data() -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.dropna(subset=["Cabang", "Tanggal"])
     combined = combined.drop_duplicates(subset=["Cabang", "NomorPengiriman"])
+    _save_cached_combined(WALKIN_DATA_DIR, "walkin_combined", combined)
     return combined
 
 
@@ -2257,7 +2381,7 @@ def generate_pdf_report(df_main, sb_dict, walkin_df, pilar_summary, mc_summary, 
 
 # ========================= UI ==========================
 
-for _d in [MAIN_DATA_DIR, ADS_DATA_DIR, WALKIN_DATA_DIR, TARGET_DATA_DIR, CORP_DATA_DIR, LOG_DIR, PROJECTS_DATA_DIR]:
+for _d in [MAIN_DATA_DIR, ADS_DATA_DIR, WALKIN_DATA_DIR, TARGET_DATA_DIR, CORP_DATA_DIR, LOG_DIR, PROJECTS_DATA_DIR, CACHE_DATA_DIR]:
     os.makedirs(_d, exist_ok=True)
 
 if _GH_ENABLED and not st.session_state.get("_gh_synced"):
@@ -2420,7 +2544,12 @@ with st.sidebar:
                         pass
                 st.rerun()
 
-df_main = load_all_main_data()
+_n_main_files = len([f for f in os.listdir(MAIN_DATA_DIR) if f.lower().endswith((".xlsx", ".xls"))]) if os.path.isdir(MAIN_DATA_DIR) else 0
+if _n_main_files and not os.path.exists(_cache_paths("main_combined")[0]):
+    with st.spinner(f"Memuat {_n_main_files} file Omset (baru pertama kali / setelah restart, mohon tunggu)..."):
+        df_main = load_all_main_data()
+else:
+    df_main = load_all_main_data()
 df_ads = load_all_ads_data()
 df_walkin = load_all_walkin_data()
 
@@ -2501,8 +2630,15 @@ mc_summary = build_mc_contribution_summary(df_main, tanggal_acuan, selected_bran
 mc_person_table = build_mc_person_table(df_main, tanggal_acuan, selected_branches)
 retail_by_branch = build_retail_by_branch(df_main, tanggal_acuan, selected_branches)
 
+# Log riwayat & backup GitHub hanya jalan saat data Omset benar-benar berubah
+# (dideteksi dari signature folder data/main), BUKAN di setiap rerun/interaksi —
+# supaya klik ganti tanggal/filter/tab tidak memicu tulis CSV + panggilan API
+# GitHub berulang-ulang yang bikin dashboard terasa lambat.
 if not df_main.empty:
-    build_upload_log(df_main)
+    _main_sig = _dir_signature(MAIN_DATA_DIR)
+    if st.session_state.get("_last_log_sig") != _main_sig:
+        build_upload_log(df_main)
+        st.session_state["_last_log_sig"] = _main_sig
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🏠 Ringkasan", "🏆 Scoreboard", "📢 Iklan", "🚶 Walk-in", "🧩 6 Pilar", "🤝 Kontribusi MC", "📈 Sales & Marketing",
@@ -2740,92 +2876,150 @@ with tab7:
     st.subheader("📈 Sales & Marketing — Project Tracker")
     df_projects = _read_projects()
 
-    if not df_projects.empty:
-        total_proj = len(df_projects)
-        selesai_count = int((df_projects["Status"] == "Selesai").sum())
-        berjalan_count = int((df_projects["Status"] == "Berjalan").sum())
-        overdue_count = int(df_projects.apply(_project_is_overdue, axis=1).sum())
+    total_proj = len(df_projects)
+    selesai_proj = int((df_projects["Status"] == "Selesai").sum()) if not df_projects.empty else 0
+    berjalan_proj = int((df_projects["Status"] == "Berjalan").sum()) if not df_projects.empty else 0
+    overdue_mask = df_projects.apply(_project_is_overdue, axis=1) if not df_projects.empty else pd.Series(dtype=bool)
+    terlambat_proj = int(overdue_mask.sum()) if not df_projects.empty else 0
 
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.markdown(render_kpi_card("Total Project", format_number(total_proj), "#0f766e", "📋"), unsafe_allow_html=True)
-        with k2:
-            st.markdown(render_kpi_card("Selesai", format_number(selesai_count), "#16a34a", "✅"), unsafe_allow_html=True)
-        with k3:
-            st.markdown(render_kpi_card("Berjalan", format_number(berjalan_count), "#2563eb", "🔄"), unsafe_allow_html=True)
-        with k4:
-            st.markdown(render_kpi_card("Terlambat", format_number(overdue_count), "#dc2626", "⚠️"), unsafe_allow_html=True)
+    kpi_cols = st.columns(4)
+    kpi_specs = [
+        ("Total Project", total_proj, "#2563eb"),
+        ("Selesai", selesai_proj, "#16a34a"),
+        ("Berjalan", berjalan_proj, "#0891b2"),
+        ("Terlambat", terlambat_proj, "#dc2626"),
+    ]
+    for col, (label, val, color) in zip(kpi_cols, kpi_specs):
+        with col:
+            st.markdown(
+                f"""<div style="background:white;border-radius:12px;padding:16px;
+                border-left:5px solid {color};box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+                <div style="color:#6b7280;font-size:0.85em;font-weight:600;">{label}</div>
+                <div style="color:{color};font-size:1.8em;font-weight:800;">{val}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+    if not df_projects.empty and terlambat_proj > 0:
         st.markdown("<br/>", unsafe_allow_html=True)
+        overdue_rows = df_projects[overdue_mask]
+        overdue_items = "".join(
+            f"<li><b>{r['Nama Project']}</b> — PIC: {r.get('PIC') or '-'}, "
+            f"jatuh tempo {pd.to_datetime(r['Due Date']).strftime('%d/%m/%Y') if pd.notna(r['Due Date']) else '-'} "
+            f"({render_project_status_badge(r['Status'])})</li>"
+            for _, r in overdue_rows.iterrows()
+        )
+        st.markdown(
+            f"""<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;
+            padding:14px 18px;margin-top:8px;">
+            <b style="color:#b91c1c;">⚠️ {terlambat_proj} Project Terlambat</b>
+            <ul style="margin:8px 0 0 0;">{overdue_items}</ul>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
-        overdue_rows = df_projects[df_projects.apply(_project_is_overdue, axis=1)]
-        if not overdue_rows.empty:
-            st.markdown("###### ⚠️ Project Terlambat")
-            for _, r in overdue_rows.iterrows():
-                st.markdown(
-                    f"""<div style="border-left:4px solid #dc2626;background:#fef2f2;padding:8px 12px;border-radius:6px;margin-bottom:6px;">
-                        <b>{r['Nama Project']}</b> — PIC: {r.get('PIC','-') or '-'} — Due: {r['Due Date']} {render_project_status_badge(str(r['Status']))}
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
-            st.markdown("<br/>", unsafe_allow_html=True)
+    st.markdown("<br/>", unsafe_allow_html=True)
+    st.markdown("###### Daftar Project")
+    st.caption("Tambah, edit, atau hapus baris langsung di tabel. Klik 💾 Simpan Perubahan setelah selesai.")
 
-    st.caption("Tambah, edit, atau hapus baris project langsung di tabel ini (klik ➕ di baris terakhir untuk menambah, atau pilih baris lalu tekan Delete). Klik 'Simpan Perubahan' untuk menyimpan permanen.")
-
-    editor_source = df_projects.copy()
-    if editor_source.empty:
-        editor_source = pd.DataFrame([{
-            "Nama Project": "", "Status": "Belum Mulai", "Due Date": date.today(), "PIC": "", "Progress (%)": 0,
-        }])
-
-    edited_projects = st.data_editor(
-        editor_source,
+    edited_df = st.data_editor(
+        df_projects,
         num_rows="dynamic",
         use_container_width=True,
         key="projects_editor",
         column_config={
             "Nama Project": st.column_config.TextColumn("Nama Project", required=True, width="large"),
-            "Status": st.column_config.SelectboxColumn("Status", options=_PROJECT_STATUS_OPTIONS, required=True),
-            "Due Date": st.column_config.DateColumn("Due Date", format="DD/MM/YYYY"),
-            "PIC": st.column_config.TextColumn("PIC"),
-            "Progress (%)": st.column_config.ProgressColumn("Progress (%)", min_value=0, max_value=100, format="%d%%"),
+            "Status": st.column_config.SelectboxColumn(
+                "Status", options=_PROJECT_STATUS_OPTIONS, required=True, width="medium"
+            ),
+            "Due Date": st.column_config.DateColumn("Due Date", format="DD/MM/YYYY", width="small"),
+            "PIC": st.column_config.TextColumn("PIC", width="medium"),
+            "Progress (%)": st.column_config.ProgressColumn(
+                "Progress (%)", min_value=0, max_value=100, format="%d%%", width="medium"
+            ),
         },
     )
 
-    if st.button("💾 Simpan Perubahan", key="btn_save_projects"):
-        clean = edited_projects.dropna(subset=["Nama Project"])
-        clean = clean[clean["Nama Project"].astype(str).str.strip() != ""]
+    if st.button("💾 Simpan Perubahan", key="save_projects_btn"):
+        clean = edited_df.copy()
+        clean = clean[clean["Nama Project"].notna() & (clean["Nama Project"].astype(str).str.strip() != "")]
+        if "Status" in clean.columns:
+            clean["Status"] = clean["Status"].fillna("Belum Mulai")
+        if "Progress (%)" in clean.columns:
+            clean["Progress (%)"] = pd.to_numeric(clean["Progress (%)"], errors="coerce").fillna(0).clip(0, 100)
         _save_projects(clean)
-        st.success("Perubahan project tersimpan.")
+        st.success("Perubahan project berhasil disimpan.")
         st.rerun()
 
     if not df_projects.empty:
-        st.markdown("###### Distribusi Status Project")
+        st.markdown("<br/>", unsafe_allow_html=True)
         status_counts = df_projects["Status"].value_counts().reindex(_PROJECT_STATUS_OPTIONS).fillna(0)
-        fig_status = go.Figure(data=[go.Pie(
-            labels=status_counts.index, values=status_counts.values,
+        fig_proj = go.Figure(data=[go.Pie(
+            labels=status_counts.index,
+            values=status_counts.values,
+            hole=0.5,
             marker=dict(colors=[_PROJECT_STATUS_COLORS.get(s, "#9ca3af") for s in status_counts.index]),
-            hole=0.45,
         )])
-        fig_status.update_layout(height=300, margin=dict(t=20, b=10, l=10, r=10))
-        st.plotly_chart(fig_status, use_container_width=True, key="chart_project_status")
+        fig_proj.update_layout(height=320, margin=dict(t=30, b=10, l=10, r=10), title="Distribusi Status Project")
+        st.plotly_chart(fig_proj, use_container_width=True, key="chart_project_status")
 
 st.markdown("---")
 st.subheader("📦 Export Laporan Lengkap")
-exp1, exp2 = st.columns(2)
-with exp1:
+exp_col1, exp_col2 = st.columns(2)
+with exp_col1:
     if st.button("📊 Buat Laporan PPTX", key="btn_gen_pptx"):
-        pptx_bytes = generate_pptx_report(df_main, sb_dict, walkin_agg_current, pilar_summary, mc_summary, quarter_period_label)
-        st.session_state["_pptx_report"] = pptx_bytes
+        with st.spinner("Membuat laporan PPTX..."):
+            try:
+                pptx_bytes = generate_pptx_report(
+                    periode_label=periode_label,
+                    quarter_period_label=quarter_period_label,
+                    scoreboards=scoreboards,
+                    pilar_summary=pilar_summary,
+                    mc_summary=mc_summary,
+                    df_ads=df_ads,
+                    walkin_current=walkin_current,
+                )
+                st.session_state["_pptx_report"] = pptx_bytes
+                st.success("Laporan PPTX berhasil dibuat.")
+            except Exception as e:
+                st.error(f"Gagal membuat laporan PPTX: {e}")
     if st.session_state.get("_pptx_report"):
-        st.download_button("⬇️ Download Laporan PPTX", data=st.session_state["_pptx_report"],
-                            file_name=f"laporan_mflash_{tanggal_acuan}.pptx",
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                            key="dl_pptx_report")
-with exp2:
+        st.download_button(
+            "⬇️ Unduh Laporan PPTX",
+            data=st.session_state["_pptx_report"],
+            file_name=f"Laporan_MFlash_{date.today().isoformat()}.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            key="dl_pptx",
+        )
+with exp_col2:
     if st.button("📄 Buat Laporan PDF", key="btn_gen_pdf"):
-        pdf_bytes = generate_pdf_report(df_main, sb_dict, walkin_agg_current, pilar_summary, mc_summary, quarter_period_label)
-        st.session_state["_pdf_report"] = pdf_bytes
+        with st.spinner("Membuat laporan PDF..."):
+            try:
+                pdf_bytes = generate_pdf_report(
+                    periode_label=periode_label,
+                    quarter_period_label=quarter_period_label,
+                    scoreboards=scoreboards,
+                    pilar_summary=pilar_summary,
+                    mc_summary=mc_summary,
+                    df_ads=df_ads,
+                    walkin_current=walkin_current,
+                )
+                st.session_state["_pdf_report"] = pdf_bytes
+                st.success("Laporan PDF berhasil dibuat.")
+            except Exception as e:
+                st.error(f"Gagal membuat laporan PDF: {e}")
     if st.session_state.get("_pdf_report"):
-        st.download_button("⬇️ Download Laporan PDF", data=st.session_state["_pdf_report"],
-                            file_name=f"laporan_mflash_{tanggal_acuan}.pdf", mime="application/pdf",
-                            key="dl_pdf_report")
+        st.download_button(
+            "⬇️ Unduh Laporan PDF",
+            data=st.session_state["_pdf_report"],
+            file_name=f"Laporan_MFlash_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            key="dl_pdf",
+        )
+
+st.markdown(
+    """<div style="text-align:center;color:#9ca3af;font-size:0.8em;margin-top:24px;">
+    Dashboard Omset MFlash — Internal Use Only
+    </div>""",
+    unsafe_allow_html=True,
+)

@@ -7,3 +7,4 @@ reportlab>=4.0
 Pillow>=10.0
 requests>=2.31
 matplotlib>=3.7
+pyarrow>=14.0
