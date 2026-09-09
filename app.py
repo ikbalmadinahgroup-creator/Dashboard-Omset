@@ -8,17 +8,22 @@ JPG/PDF, insight otomatis, dan export laporan lengkap ke PPTX/PDF.
 Scoreboard mengikuti persis format & rumus pada sheet "Scoreboard" di
 file Excel master (target kuartalan, EXPECTED VALUE berdasar hari
 berjalan dalam kuartal, % PENCAPAIAN = S/D HARI INI dibagi EXPECTED
-VALUE). Tabel Walk-in per cabang bersifat KUMULATIF dari awal kuartal
-(1 Juli/Okt/Jan/Apr) sampai Tanggal Acuan yang dipilih (konsisten
-dengan S/D HARI INI di Scoreboard). Loader data Omset & Walk-in
-memakai pandas.read_excel (bukan openpyxl read_only) supaya tahan
-terhadap file export MFlash dengan metadata dimensi sheet yang tidak
-akurat. Loader Iklan mem-buang kolom duplikat sebelum digabung
-(pd.concat) untuk mencegah pandas.errors.InvalidIndexError. Tab
-Sales & Marketing berisi project tracker interaktif (tambah/edit/hapus
-baris langsung di dashboard, dibungkus st.form supaya mengetik di
-tabel tidak memicu rerun seluruh dashboard) dengan status, due date,
-PIC, dan progress.
+VALUE). Target Omset bersifat KUARTALAN (berlaku 1 kuartal penuh - mis.
+Jul-Sep - dan TIDAK perlu diupload ulang tiap hari; hanya perlu upload
+ulang saat masuk kuartal berikutnya dengan angka target yang berbeda).
+Tabel Walk-in per cabang bersifat KUMULATIF dari awal kuartal (1 Juli/
+Okt/Jan/Apr) sampai Tanggal Acuan yang dipilih (konsisten dengan S/D
+HARI INI di Scoreboard). Loader data Omset & Walk-in memakai
+pandas.read_excel (bukan openpyxl read_only) supaya tahan terhadap
+file export MFlash dengan metadata dimensi sheet yang tidak akurat.
+Loader Iklan mem-buang kolom duplikat sebelum digabung (pd.concat)
+untuk mencegah pandas.errors.InvalidIndexError. Tab Sales & Marketing
+berisi project tracker interaktif (tambah/edit/hapus baris langsung di
+dashboard, dibungkus st.form supaya mengetik di tabel tidak memicu
+rerun seluruh dashboard) dengan status, due date, PIC, progress (+
+kendala, catatan, action plan per project), dan ringkasan progress
+berwarna per status di bawah tabel (karena ProgressColumn bawaan
+Streamlit tidak mendukung warna kustom).
 Loader per-file di-cache (st.cache_data, key = path+mtime+size) supaya
 file Excel yang belum berubah tidak dibaca ulang setiap kali ada
 interaksi di dashboard (setiap klik/filter membuat Streamlit menjalankan
@@ -196,12 +201,11 @@ def _load_cached_combined(dir_path: str, cache_name: str):
     """Coba muat DataFrame gabungan dari cache parquet di disk, dipakai supaya
     cold-start (aplikasi baru di-deploy ulang atau bangun dari 'sleep' di
     Streamlit Cloud) tidak perlu mem-parse ulang SEMUA file Excel dari nol tiap
-    kali - cukup baca file parquet yang jauh lebih cepat (bisa >1000x lebih
-    cepat dibanding baca ulang puluhan file Excel), selama isi folder sumber
-    (dideteksi lewat _dir_signature) belum berubah sejak cache terakhir dibuat.
-    Beda dengan st.cache_data (yang hilang tiap kali proses Streamlit restart),
-    cache ini disimpan di disk (dan di-backup ke GitHub kalau aktif) supaya
-    tetap ada walau aplikasi baru saja restart/cold-start."""
+    kali - cukup baca file parquet yang jauh lebih cepat, selama isi folder
+    sumber (dideteksi lewat _dir_signature) belum berubah sejak cache terakhir
+    dibuat. Beda dengan st.cache_data (yang hilang tiap kali proses Streamlit
+    restart), cache ini disimpan di disk (dan di-backup ke GitHub kalau aktif)
+    supaya tetap ada walau aplikasi baru saja restart/cold-start."""
     parquet_path, sig_path = _cache_paths(cache_name)
     if not (os.path.exists(parquet_path) and os.path.exists(sig_path)):
         return None
@@ -223,9 +227,8 @@ def _save_cached_combined(dir_path: str, cache_name: str, df: pd.DataFrame):
     """Simpan DataFrame gabungan ke cache parquet di disk (+ backup ke GitHub
     kalau aktif) supaya cold-start berikutnya bisa langsung pakai cache ini
     selama file Excel sumber belum berubah. Kalau gagal (mis. ada kolom
-    bertipe campuran yang tidak bisa diserialisasi ke parquet - pernah terjadi
-    pada file export Iklan Meta Ads), gagal diam-diam saja tanpa mengganggu
-    data yang sudah berhasil dimuat."""
+    bertipe campuran yang tidak bisa diserialisasi ke parquet), gagal diam-diam
+    saja tanpa mengganggu data yang sudah berhasil dimuat."""
     if df is None or df.empty:
         return
     parquet_path, sig_path = _cache_paths(cache_name)
@@ -1269,6 +1272,16 @@ def _quarter_bounds(d: date):
 _quarter_bounds_for = _quarter_bounds
 
 
+def target_period_caption(tanggal_acuan: date) -> str:
+    """Teks penjelasan bahwa Target Omset berlaku untuk 1 kuartal PENUH
+    (mis. Jul-Sep), tidak perlu upload ulang setiap hari - hanya perlu
+    upload ulang saat masuk kuartal berikutnya dengan angka target baru."""
+    start, end, _, _, _ = _quarter_bounds(tanggal_acuan)
+    return (f"Target Omset berlaku untuk 1 kuartal penuh: **{start.strftime('%d %b')} - {end.strftime('%d %b %Y')}**. "
+            f"Tidak perlu upload ulang setiap hari — cukup upload sekali di awal kuartal ini, dan upload lagi "
+            f"dengan angka baru saat masuk kuartal berikutnya.")
+
+
 def pencapaian_color(pct):
     """Hijau >=100%, kuning 85-99.9%, merah <85%, abu-abu kalau tidak ada Target (None)."""
     if pct is None:
@@ -1896,7 +1909,7 @@ def compute_corp_hari_ini(df_corp: pd.DataFrame, tanggal_acuan: date):
 # ========================= Sales & Marketing Project Tracker =========================
 
 _PROJECTS_PATH = os.path.join(DATA_DIR, "projects", "sales_marketing_projects.csv")
-_PROJECTS_COLUMNS = ["Nama Project", "Status", "Due Date", "PIC", "Progress (%)"]
+_PROJECTS_COLUMNS = ["Nama Project", "Status", "Due Date", "PIC", "Progress (%)", "Kendala", "Catatan", "Action Plan"]
 _PROJECT_STATUS_OPTIONS = ["Belum Mulai", "Berjalan", "Selesai", "Tertunda"]
 _PROJECT_STATUS_COLORS = {
     "Belum Mulai": "#9ca3af", "Berjalan": "#2563eb", "Selesai": "#16a34a", "Tertunda": "#dc2626",
@@ -1918,8 +1931,9 @@ def _read_projects() -> pd.DataFrame:
         df["Due Date"] = pd.to_datetime(df["Due Date"], errors="coerce").dt.date
     if "Progress (%)" in df.columns:
         df["Progress (%)"] = pd.to_numeric(df["Progress (%)"], errors="coerce").fillna(0).clip(0, 100)
-    if "PIC" in df.columns:
-        df["PIC"] = df["PIC"].where(df["PIC"].notna(), "")
+    for c in ["PIC", "Kendala", "Catatan", "Action Plan"]:
+        if c in df.columns:
+            df[c] = df[c].where(df[c].notna(), "")
     return df.reset_index(drop=True)
 
 
@@ -1953,6 +1967,51 @@ def _project_is_overdue(row) -> bool:
 def render_project_status_badge(status: str) -> str:
     color = _PROJECT_STATUS_COLORS.get(status, "#6b7280")
     return f'<span style="background:{color};color:white;padding:2px 10px;border-radius:12px;font-size:0.8em;font-weight:600;">{status}</span>'
+
+
+def render_project_progress_bar(row) -> str:
+    """Progress bar berwarna per project, warnanya mengikuti Status (Streamlit
+    ProgressColumn bawaan tidak mendukung warna kustom per baris, jadi kita
+    render sendiri pakai HTML/CSS supaya progress-nya jelas terlihat berwarna)."""
+    status = str(row.get("Status") or "Belum Mulai")
+    color = _PROJECT_STATUS_COLORS.get(status, "#9ca3af")
+    try:
+        pct = float(row.get("Progress (%)") or 0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    pct = max(0.0, min(100.0, pct))
+    nama = row.get("Nama Project") or "-"
+    pic = row.get("PIC") or "-"
+    due = row.get("Due Date")
+    try:
+        due_str = pd.to_datetime(due).strftime("%d/%m/%Y") if due and pd.notna(due) else "-"
+    except Exception:
+        due_str = "-"
+    kendala = str(row.get("Kendala") or "").strip()
+    catatan = str(row.get("Catatan") or "").strip()
+    action_plan = str(row.get("Action Plan") or "").strip()
+    notes_html = ""
+    if kendala:
+        notes_html += f"<div style='margin-top:4px;'><b style='color:#b91c1c;'>⚠️ Kendala:</b> {kendala}</div>"
+    if catatan:
+        notes_html += f"<div style='margin-top:2px;'><b style='color:#374151;'>📝 Catatan:</b> {catatan}</div>"
+    if action_plan:
+        notes_html += f"<div style='margin-top:2px;'><b style='color:#0f766e;'>🎯 Action Plan:</b> {action_plan}</div>"
+    return f"""<div style="background:white;border-radius:10px;padding:14px 16px;margin-bottom:10px;
+    box-shadow:0 1px 3px rgba(0,0,0,0.08);border-left:4px solid {color};">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;">
+    <b style="color:#111827;">{nama}</b>
+    <span style="color:#6b7280;font-size:0.85em;">PIC: {pic} · Due: {due_str}</span>
+    </div>
+    <div style="background:#f3f4f6;border-radius:8px;height:14px;margin-top:8px;overflow:hidden;">
+    <div style="background:{color};width:{pct:.0f}%;height:100%;border-radius:8px;transition:width 0.3s;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:4px;">
+    <span style="color:{color};font-weight:700;font-size:0.85em;">{pct:.0f}%</span>
+    {render_project_status_badge(status)}
+    </div>
+    {notes_html}
+    </div>"""
 
 
 # ========================= PPTX/PDF export machinery =========================
@@ -2155,6 +2214,8 @@ with st.sidebar.expander("🚶 Data Walk-in", expanded=False):
             st.rerun()
 
 with st.sidebar.expander("🎯 Target Omset (opsional)", expanded=False):
+    st.caption("📌 Target berlaku 1 kuartal penuh (mis. Jul-Sep). Upload sekali saja per kuartal - "
+               "tidak perlu upload ulang tiap hari, hanya saat masuk kuartal baru dengan angka berbeda.")
     st.download_button("⬇️ Download Template Target", data=make_target_template(),
                         file_name="template_target_omset.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -2268,9 +2329,6 @@ with filt_col2:
 if not selected_branches:
     selected_branches = all_branches_available
 
-periode_label = tanggal_acuan.strftime("%B %Y")
-for en, idn in BULAN_ID.items():
-    pass
 periode_label = f"{BULAN_ID.get(tanggal_acuan.month, '')} {tanggal_acuan.year}"
 _q_start, _q_end, _, _, _ = _quarter_bounds(tanggal_acuan)
 quarter_period_label = f"{_q_start.strftime('%d %b')} - {_q_end.strftime('%d %b %Y')}"
@@ -2334,8 +2392,10 @@ with tab1:
             "💡 % Pencapaian belum bisa ditampilkan karena belum ada data **Target Omset** untuk periode ini. "
             "Upload file Target lewat menu **🎯 Target Omset (opsional)** di sidebar (bisa download template-nya "
             "di situ juga), atau upload file master yang sudah berisi sheet Scoreboard. Ring akan otomatis "
-            "berwarna begitu Target tersedia."
+            "berwarna begitu Target tersedia.\n\n" + target_period_caption(tanggal_acuan)
         )
+    else:
+        st.caption("✅ " + target_period_caption(tanggal_acuan))
 
     st.markdown("<br/>", unsafe_allow_html=True)
     kategori_pilih_progress = st.selectbox("Kategori untuk grafik progres", SCOREBOARD_KATEGORI, key="progress_kategori")
@@ -2375,7 +2435,7 @@ with tab2:
     scoreboard_kategori_pilih = st.selectbox("Kategori", SCOREBOARD_KATEGORI, key="scoreboard_kategori")
     sb_display = scoreboards.get(scoreboard_kategori_pilih, pd.DataFrame())
     if not _has_target_data:
-        st.caption("⚠️ Belum ada Target Omset - kolom % PENCAPAIAN akan menampilkan '-' sampai Target di-upload.")
+        st.caption("⚠️ Belum ada Target Omset - kolom % PENCAPAIAN akan menampilkan '-' sampai Target di-upload. " + target_period_caption(tanggal_acuan))
     st.markdown(render_scoreboard_html(sb_display), unsafe_allow_html=True)
 
     exp_col1, exp_col2 = st.columns(2)
@@ -2593,12 +2653,22 @@ with tab7:
             unsafe_allow_html=True,
         )
 
+    if not df_projects.empty:
+        st.markdown("<br/>", unsafe_allow_html=True)
+        st.markdown("###### 📊 Progress per Project")
+        st.caption("Progress bar berwarna sesuai Status (Belum Mulai = abu-abu, Berjalan = biru, Selesai = hijau, Tertunda = merah).")
+        for _, r in df_projects.iterrows():
+            if not str(r.get("Nama Project") or "").strip():
+                continue
+            st.markdown(render_project_progress_bar(r), unsafe_allow_html=True)
+
     st.markdown("<br/>", unsafe_allow_html=True)
     st.markdown("###### Daftar Project")
     st.caption(
         "Tambah, edit, atau hapus baris langsung di tabel, lalu klik 💾 Simpan Perubahan. "
         "Mengetik/memilih di dalam tabel TIDAK akan me-refresh dashboard — perubahan baru diproses "
-        "sekali saat tombol Simpan diklik, supaya lebih responsif."
+        "sekali saat tombol Simpan diklik, supaya lebih responsif. Isi Kendala/Catatan/Action Plan "
+        "untuk mencatat hambatan dan rencana tindak lanjut per project."
     )
 
     with st.form("project_form", clear_on_submit=False):
@@ -2608,15 +2678,18 @@ with tab7:
             use_container_width=True,
             key="projects_editor",
             column_config={
-                "Nama Project": st.column_config.TextColumn("Nama Project", required=True, width="large"),
+                "Nama Project": st.column_config.TextColumn("Nama Project", required=True, width="medium"),
                 "Status": st.column_config.SelectboxColumn(
-                    "Status", options=_PROJECT_STATUS_OPTIONS, required=True, width="medium"
+                    "Status", options=_PROJECT_STATUS_OPTIONS, required=True, width="small"
                 ),
                 "Due Date": st.column_config.DateColumn("Due Date", format="DD/MM/YYYY", width="small"),
-                "PIC": st.column_config.TextColumn("PIC", width="medium"),
+                "PIC": st.column_config.TextColumn("PIC", width="small"),
                 "Progress (%)": st.column_config.ProgressColumn(
-                    "Progress (%)", min_value=0, max_value=100, format="%d%%", width="medium"
+                    "Progress (%)", min_value=0, max_value=100, format="%d%%", width="small"
                 ),
+                "Kendala": st.column_config.TextColumn("Kendala", width="medium"),
+                "Catatan": st.column_config.TextColumn("Catatan", width="medium"),
+                "Action Plan": st.column_config.TextColumn("Action Plan", width="medium"),
             },
         )
         submitted = st.form_submit_button("💾 Simpan Perubahan")
