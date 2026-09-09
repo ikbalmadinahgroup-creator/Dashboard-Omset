@@ -11,6 +11,11 @@ berjalan dalam kuartal, % PENCAPAIAN = S/D HARI INI dibagi EXPECTED
 VALUE). Target Omset bersifat KUARTALAN (berlaku 1 kuartal penuh - mis.
 Jul-Sep - dan TIDAK perlu diupload ulang tiap hari; hanya perlu upload
 ulang saat masuk kuartal berikutnya dengan angka target yang berbeda).
+Loader Target mendukung DUA format file: format panjang (kolom Cabang,
+Kategori, Target - satu baris per kombinasi cabang x kategori, sesuai
+template bawaan) DAN format lebar (kolom Cabang, Target Service, Target
+Gadget, Target All, dst - satu baris per cabang dengan semua kategori
+sekaligus, format yang lebih umum dipakai user secara natural).
 Tabel Walk-in per cabang bersifat KUMULATIF dari awal kuartal (1 Juli/
 Okt/Jan/Apr) sampai Tanggal Acuan yang dipilih (konsisten dengan S/D
 HARI INI di Scoreboard). Loader data Omset & Walk-in memakai
@@ -261,10 +266,13 @@ CORP_DATA_DIR = os.path.join(DATA_DIR, "corp")
 LOG_DIR = os.path.join(DATA_DIR, "log")
 PROJECTS_DATA_DIR = os.path.join(DATA_DIR, "projects")
 
+# Catatan: cabang ke-13 adalah TELUKJ (bukan KARAWANG - ini sempat salah di
+# versi sebelumnya, dikoreksi setelah membandingkan dengan file Target Omset
+# asli yang di-upload user, yang berisi 18 cabang persis dengan nama ini).
 BRANCH_ORDER = [
     "KLENDER", "CEGER", "BINTARA", "RADJIMAN", "JATIMULYA", "DRAMAGA",
     "CONDET", "JATIBENING", "SAWANGAN", "WARBONG", "CINERE", "CIBINONG",
-    "KARAWANG", "JATIWARINGIN", "CIKAMPEK", "CILANGKAP", "PEJATEN", "CIBUBUR",
+    "TELUKJ", "JATIWARINGIN", "CIKAMPEK", "CILANGKAP", "PEJATEN", "CIBUBUR",
 ]
 _BRANCH_RANK = {b: i for i, b in enumerate(BRANCH_ORDER)}
 
@@ -1213,17 +1221,61 @@ SCOREBOARD_KATEGORI = ["Omset All", "Service", "Gadget & Aksesoris"]
 
 
 def load_target_data(path: str):
-    """Baca file Target Omset (per Cabang x Kategori) -> dict {kategori: {cabang: target}}."""
+    """Baca file Target Omset -> dict {kategori: {cabang: target}}.
+    Mendukung DUA format:
+    1. Format LEBAR (paling umum dipakai user secara natural): satu baris per
+       cabang, satu kolom per kategori - mis. kolom 'Cabang', 'Target Service',
+       'Target Gadget', 'Target All', (opsional) 'Target Corporate'.
+    2. Format PANJANG (sesuai template bawaan dashboard): kolom 'Cabang',
+       'Kategori', 'Target' - satu baris per kombinasi cabang x kategori.
+    """
     target_map = {k: {} for k in SCOREBOARD_KATEGORI}
     try:
-        df = pd.read_excel(path)
+        df = pd.read_excel(path, sheet_name=0)
     except Exception:
         return target_map
     df.columns = [str(c).strip() for c in df.columns]
     col_cabang = next((c for c in df.columns if c.strip().upper() == "CABANG"), None)
+    if col_cabang is None:
+        return target_map
+
+    # --- Coba format LEBAR dulu: cari semua kolom yang mengandung kata "TARGET"
+    # lalu petakan ke kategori scoreboard berdasar kata kunci di nama kolomnya.
+    wide_col_map = {}
+    for c in df.columns:
+        if c == col_cabang:
+            continue
+        up = c.strip().upper()
+        if "TARGET" not in up:
+            continue
+        if "SERVICE" in up:
+            wide_col_map[c] = "Service"
+        elif "GADGET" in up or "AKSESORIS" in up or "ACCESSORIES" in up:
+            wide_col_map[c] = "Gadget & Aksesoris"
+        elif "CORPORATE" in up or "CORP" in up:
+            wide_col_map[c] = "Marketing Corporate"
+        elif "ALL" in up or up.strip() == "TARGET":
+            wide_col_map[c] = "Omset All"
+
+    if wide_col_map:
+        for _, row in df.iterrows():
+            cabang = _nan_to_none(row.get(col_cabang))
+            if not cabang:
+                continue
+            cabang = str(cabang).strip().upper()
+            for col, kategori in wide_col_map.items():
+                target = _to_float_or_none(row.get(col))
+                if target is None:
+                    continue
+                if kategori not in target_map:
+                    target_map[kategori] = {}
+                target_map[kategori][cabang] = target
+        return target_map
+
+    # --- Fallback ke format PANJANG (Cabang, Kategori, Target).
     col_kategori = next((c for c in df.columns if c.strip().upper() == "KATEGORI"), None)
     col_target = next((c for c in df.columns if "TARGET" in c.strip().upper()), None)
-    if not (col_cabang and col_kategori and col_target):
+    if not (col_kategori and col_target):
         return target_map
     for _, row in df.iterrows():
         cabang = _nan_to_none(row.get(col_cabang))
@@ -1402,8 +1454,6 @@ def extract_scoreboard_target(path: str):
             if not cabang or target is None:
                 continue
             cabang = str(cabang).strip().upper()
-            if cabang not in BRANCH_ORDER:
-                continue
             target_map["Omset All"][cabang] = target
     except Exception:
         pass
@@ -2215,7 +2265,9 @@ with st.sidebar.expander("🚶 Data Walk-in", expanded=False):
 
 with st.sidebar.expander("🎯 Target Omset (opsional)", expanded=False):
     st.caption("📌 Target berlaku 1 kuartal penuh (mis. Jul-Sep). Upload sekali saja per kuartal - "
-               "tidak perlu upload ulang tiap hari, hanya saat masuk kuartal baru dengan angka berbeda.")
+               "tidak perlu upload ulang tiap hari, hanya saat masuk kuartal baru dengan angka berbeda. "
+               "Format bebas: boleh 1 kolom Target per kategori (Cabang, Target Service, Target Gadget, "
+               "Target All) atau format template (Cabang, Kategori, Target).")
     st.download_button("⬇️ Download Template Target", data=make_target_template(),
                         file_name="template_target_omset.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
