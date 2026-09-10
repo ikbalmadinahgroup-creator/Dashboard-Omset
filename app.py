@@ -161,6 +161,36 @@ def github_list_dir(path: str):
     return []
 
 
+def _gh_check_connection():
+    """Tes koneksi GitHub SATU KALI (dipanggil sekali per sesi lewat
+    st.session_state) untuk memastikan backup otomatis benar-benar aktif dan
+    bisa diakses - bukan cuma cek token/repo terisi di secrets. Ini penting
+    karena kalau backup GitHub gagal/tidak aktif, SEMUA data yang di-upload
+    user (Target, Project Tracker, Omset, dst) akan HILANG setiap kali
+    aplikasi Streamlit Cloud restart/redeploy/bangun dari sleep, karena
+    filesystem Streamlit Cloud sendiri tidak permanen.
+    Return: (status: bool, pesan: str)."""
+    if not _GH_ENABLED:
+        return False, ("Belum dikonfigurasi. Tanpa GITHUB_TOKEN & GITHUB_REPO di Secrets Streamlit Cloud, "
+                        "semua data (Target, Project Tracker, Omset, dst) akan HILANG setiap kali aplikasi "
+                        "restart/redeploy/bangun dari sleep - ini kemungkinan besar penyebab Target dan "
+                        "Project Tracker kamu hilang berulang kali.")
+    token, repo, branch = _gh_config()
+    url = f"https://api.github.com/repos/{repo}"
+    try:
+        r = requests.get(url, headers=_gh_headers(), timeout=10)
+        if r.status_code == 200:
+            return True, f"Aktif — tersambung ke repo `{repo}` (branch `{branch}`). Data otomatis di-backup & dipulihkan tiap restart."
+        elif r.status_code == 404:
+            return False, f"Repo `{repo}` tidak ditemukan atau token tidak punya akses ke repo ini (HTTP 404). Cek lagi nama repo & permission token GitHub-nya."
+        elif r.status_code == 401:
+            return False, "Token GitHub tidak valid/kadaluarsa (HTTP 401). Buat token baru dan update di Secrets Streamlit Cloud."
+        else:
+            return False, f"Gagal tersambung ke GitHub (HTTP {r.status_code}). Backup otomatis kemungkinan tidak berjalan."
+    except Exception as e:
+        return False, f"Gagal tersambung ke GitHub: {e}"
+
+
 def sync_data_from_github():
     if not _GH_ENABLED:
         return
@@ -196,13 +226,19 @@ def _dir_signature(dir_path: str) -> str:
 
 CACHE_DATA_DIR = os.path.join("data", "_cache")
 
+# Naikkan angka ini setiap kali logika pengisian kolom di load_all_main_data()
+# berubah (mis. classify_pilar_hybrid), supaya cache parquet lama di disk/
+# GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
+# dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
+MAIN_DATA_SCHEMA_VERSION = 2
+
 
 def _cache_paths(name: str):
     base = os.path.join(CACHE_DATA_DIR, name)
     return base + ".parquet", base + ".sig"
 
 
-def _load_cached_combined(dir_path: str, cache_name: str, required_cols=None):
+def _load_cached_combined(dir_path: str, cache_name: str, required_cols=None, schema_version: int = 1):
     """Coba muat DataFrame gabungan dari cache parquet di disk, dipakai supaya
     cold-start (aplikasi baru di-deploy ulang atau bangun dari 'sleep' di
     Streamlit Cloud) tidak perlu mem-parse ulang SEMUA file Excel dari nol tiap
@@ -214,8 +250,13 @@ def _load_cached_combined(dir_path: str, cache_name: str, required_cols=None):
 
     required_cols: kalau diisi, cache yang skema-nya sudah usang (mis. setelah
     update app.py menambah kolom baru seperti PilarExcel) otomatis dianggap
-    tidak valid dan di-skip, supaya kolom baru itu tidak hilang gara-gara
-    cache lama yang masih dipakai."""
+    tidak valid dan di-skip.
+    schema_version: dibandingkan dengan versi yang disimpan di file .sig - kalau
+    beda (mis. setelah logika klasifikasi di app.py berubah tanpa menambah/
+    menghapus kolom, seperti classify_pilar_hybrid), cache lama otomatis
+    dianggap usang walau nama kolomnya masih sama persis. WAJIB dinaikkan
+    setiap kali logika pengisian salah satu kolom cache berubah, supaya
+    perbaikan tidak "hilang" gara-gara cache lama yang masih dipakai."""
     parquet_path, sig_path = _cache_paths(cache_name)
     if not (os.path.exists(parquet_path) and os.path.exists(sig_path)):
         return None
@@ -225,7 +266,8 @@ def _load_cached_combined(dir_path: str, cache_name: str, required_cols=None):
     except Exception:
         return None
     current_sig = _dir_signature(dir_path)
-    if not current_sig or saved_sig != current_sig:
+    expected_sig = f"v{schema_version}::{current_sig}"
+    if not current_sig or saved_sig != expected_sig:
         return None
     try:
         df_cached = pd.read_parquet(parquet_path, engine="pyarrow")
@@ -236,7 +278,7 @@ def _load_cached_combined(dir_path: str, cache_name: str, required_cols=None):
     return df_cached
 
 
-def _save_cached_combined(dir_path: str, cache_name: str, df: pd.DataFrame):
+def _save_cached_combined(dir_path: str, cache_name: str, df: pd.DataFrame, schema_version: int = 1):
     """Simpan DataFrame gabungan ke cache parquet di disk (+ backup ke GitHub
     kalau aktif) supaya cold-start berikutnya bisa langsung pakai cache ini
     selama file Excel sumber belum berubah. Kalau gagal (mis. ada kolom
@@ -248,7 +290,7 @@ def _save_cached_combined(dir_path: str, cache_name: str, df: pd.DataFrame):
     try:
         os.makedirs(CACHE_DATA_DIR, exist_ok=True)
         df.to_parquet(parquet_path, engine="pyarrow", index=False)
-        sig = _dir_signature(dir_path)
+        sig = f"v{schema_version}::{_dir_signature(dir_path)}"
         with open(sig_path, "w") as f:
             f.write(sig)
         if _GH_ENABLED:
@@ -469,6 +511,21 @@ def classify_pilar(v) -> str:
     return "Lainnya"
 
 
+def classify_pilar_hybrid(pilar_excel_raw, kategori_barang_raw) -> str:
+    """Klasifikasi 6 Pilar GABUNGAN: utamakan nilai kolom KATEGORI PILAR asli
+    Excel kalau isinya sudah mengarah ke salah satu dari 6 Pilar (mis. suatu
+    saat ada export yang mengisi HANDPHONE/LAPTOP/dst langsung di kolom ini).
+    Kalau kolom itu kosong ATAU isinya bukan kategori barang spesifik (di data
+    MFlash yang ada sekarang, isinya cuma SERVICE/PENJUALAN RITEL/PENGADAAN
+    CORPORATE - dua yang terakhir tidak match ke Pilar manapun), otomatis
+    jatuh ke klasifikasi dari KATEGORI BARANG (kolom ini SELALU terisi penuh)
+    supaya hasilnya tetap lengkap dan tidak didominasi 'Lainnya'."""
+    excel_cls = classify_pilar(pilar_excel_raw)
+    if excel_cls != "Lainnya":
+        return excel_cls
+    return classify_pilar(kategori_barang_raw)
+
+
 def parse_bulan(v):
     if v is None:
         return None
@@ -681,7 +738,8 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
             "Qty": qty or 0.0,
             "GrossProfit": gp or 0.0,
             "Pilar": classify_pilar(pilar_raw),
-            "PilarExcel": classify_pilar(pilar_excel_raw),
+            "PilarExcel": classify_pilar_hybrid(pilar_excel_raw, pilar_raw),
+            "PilarSource": "Excel" if classify_pilar(pilar_excel_raw) != "Lainnya" else "Barang",
             "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "TIDAK DIKETAHUI",
             "PenjualKelompok": classify_mc_or_retail(kategori_pelanggan_raw),
         })
@@ -753,7 +811,8 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
             "Qty": qty or 0.0,
             "GrossProfit": gp or 0.0,
             "Pilar": classify_pilar(pilar_raw),
-            "PilarExcel": classify_pilar(pilar_excel_raw),
+            "PilarExcel": classify_pilar_hybrid(pilar_excel_raw, pilar_raw),
+            "PilarSource": "Excel" if classify_pilar(pilar_excel_raw) != "Lainnya" else "Barang",
             "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "TIDAK DIKETAHUI",
             "PenjualKelompok": classify_mc_or_retail(kategori_pelanggan_raw),
         })
@@ -810,7 +869,7 @@ def _dedupe_main_files():
 def load_all_main_data() -> pd.DataFrame:
     if not os.path.isdir(MAIN_DATA_DIR):
         return pd.DataFrame()
-    cached = _load_cached_combined(MAIN_DATA_DIR, "main_combined", required_cols=["Pilar", "PilarExcel"])
+    cached = _load_cached_combined(MAIN_DATA_DIR, "main_combined", required_cols=["Pilar", "PilarExcel", "PilarSource"], schema_version=MAIN_DATA_SCHEMA_VERSION)
     if cached is not None:
         return cached
     frames = []
@@ -831,7 +890,7 @@ def load_all_main_data() -> pd.DataFrame:
     combined["Tahun"] = combined["Tanggal"].apply(lambda d: d.year if d else None)
     combined["Bulan"] = combined["Tanggal"].apply(lambda d: d.month if d else None)
     combined = combined.dropna(subset=["Cabang", "Tanggal"])
-    _save_cached_combined(MAIN_DATA_DIR, "main_combined", combined)
+    _save_cached_combined(MAIN_DATA_DIR, "main_combined", combined, schema_version=MAIN_DATA_SCHEMA_VERSION)
     return combined
 
 # ========================= Loader Data Iklan (Meta Ads) =========================
@@ -2064,6 +2123,40 @@ def _save_projects(df: pd.DataFrame):
         pass
 
 
+def export_projects_excel(df: pd.DataFrame) -> bytes:
+    """Backup manual Project Tracker ke Excel. Ini jaring pengaman TERPISAH dari
+    backup GitHub - kalau backup GitHub tidak aktif/gagal, user tetap bisa
+    download file ini kapan saja lalu upload lagi lewat 'Restore dari Backup'
+    untuk memulihkan seluruh daftar project tanpa perlu input ulang manual."""
+    out = df.copy() if not df.empty else pd.DataFrame(columns=_PROJECTS_COLUMNS)
+    for c in _PROJECTS_COLUMNS:
+        if c not in out.columns:
+            out[c] = None
+    out = out[_PROJECTS_COLUMNS]
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        out.to_excel(writer, index=False, sheet_name="Projects")
+    return buf.getvalue()
+
+
+def import_projects_excel(file_obj) -> pd.DataFrame:
+    """Baca file backup Project Tracker (hasil export_projects_excel) untuk
+    dipulihkan lewat _save_projects()."""
+    df = pd.read_excel(file_obj, sheet_name=0)
+    for c in _PROJECTS_COLUMNS:
+        if c not in df.columns:
+            df[c] = None
+    df = df[_PROJECTS_COLUMNS]
+    if "Due Date" in df.columns:
+        df["Due Date"] = pd.to_datetime(df["Due Date"], errors="coerce").dt.date
+    if "Progress (%)" in df.columns:
+        df["Progress (%)"] = pd.to_numeric(df["Progress (%)"], errors="coerce").fillna(0).clip(0, 100)
+    if "Status" in df.columns:
+        df["Status"] = df["Status"].fillna("Belum Mulai")
+    df = df[df["Nama Project"].notna() & (df["Nama Project"].astype(str).str.strip() != "")]
+    return df.reset_index(drop=True)
+
+
 def _project_is_overdue(row) -> bool:
     dd = row.get("Due Date")
     status = str(row.get("Status") or "")
@@ -2240,6 +2333,10 @@ def generate_pdf_report(periode_label, quarter_period_label, scoreboards, pilar_
 for _d in [MAIN_DATA_DIR, ADS_DATA_DIR, WALKIN_DATA_DIR, TARGET_DATA_DIR, CORP_DATA_DIR, LOG_DIR, PROJECTS_DATA_DIR, CACHE_DATA_DIR]:
     os.makedirs(_d, exist_ok=True)
 
+if "_gh_status" not in st.session_state:
+    st.session_state["_gh_status"] = _gh_check_connection()
+_GH_OK, _GH_MSG = st.session_state["_gh_status"]
+
 if _GH_ENABLED and not st.session_state.get("_gh_synced"):
     try:
         sync_data_from_github()
@@ -2254,6 +2351,11 @@ with header_col1:
 with header_col2:
     st.markdown("<h1 style='margin-bottom:0;color:#0f766e;'>Dashboard Omset MFlash</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color:#6b7280;margin-top:2px;'>Monitoring Omset, Iklan, Walk-in, 6 Pilar, Kontribusi Marketing & Project Sales & Marketing</p>", unsafe_allow_html=True)
+
+if _GH_OK:
+    st.sidebar.success(f"☁️ Backup GitHub: {_GH_MSG}")
+else:
+    st.sidebar.error(f"⚠️ Backup GitHub TIDAK AKTIF\n\n{_GH_MSG}")
 
 st.sidebar.markdown("## 📂 Upload Data")
 
@@ -2672,37 +2774,33 @@ with tab5:
 
     pilar_source_label = st.radio(
         "Sumber klasifikasi 6 Pilar",
-        options=["KATEGORI BARANG (Rekomendasi)", "KATEGORI PILAR (kolom Excel)"],
+        options=["KATEGORI BARANG (Rekomendasi)", "KATEGORI PILAR + KATEGORI BARANG (Gabungan)"],
         horizontal=True,
         key="pilar_source_tab5",
     )
     if pilar_source_label.startswith("KATEGORI PILAR"):
         pilar_col_selected = "PilarExcel"
-        # Kolom KATEGORI PILAR baru mulai dipakai sistem MFlash sejak awal
-        # Agustus 2026 (info dari user) - jadi transaksi SEBELUM tanggal itu
-        # WAJAR kosong (bukan masalah data). Yang perlu diperhatikan hanya
-        # transaksi Agustus-dst yang masih kosong.
-        KATEGORI_PILAR_START = date(2026, 8, 1)
-        if not df_main.empty and "PilarExcel" in df_main.columns:
-            before_mask = df_main["Tanggal"] < KATEGORI_PILAR_START
-            after_mask = ~before_mask
-            n_before = int(before_mask.sum())
-            n_after = int(after_mask.sum())
-            n_after_kosong = int((df_main.loc[after_mask, "PilarExcel"] == "Lainnya").sum()) if n_after else 0
+        # PilarExcel sekarang GABUNGAN: utamakan tag KATEGORI PILAR asli Excel
+        # kalau isinya spesifik; kalau kosong/tidak spesifik (mis. sebelum
+        # Agustus 2026 kolom ini belum ada, atau isinya PENJUALAN RITEL/
+        # PENGADAAN CORPORATE yang bukan kategori barang), otomatis pakai
+        # KATEGORI BARANG supaya hasilnya tetap lengkap (lihat classify_pilar_hybrid).
+        if not df_main.empty and "PilarSource" in df_main.columns:
+            n_total = len(df_main)
+            n_excel = int((df_main["PilarSource"] == "Excel").sum())
+            n_barang = n_total - n_excel
         else:
-            n_before = n_after = n_after_kosong = 0
-        caption_txt = (
-            "Menampilkan klasifikasi berdasarkan kolom **KATEGORI PILAR** asli di file Excel. "
-            "Kolom ini baru mulai diisi sistem MFlash sejak awal Agustus 2026, jadi transaksi sebelum "
-            "tanggal itu wajar tidak punya nilai (otomatis masuk 'Lainnya') — bukan masalah data."
+            n_total = n_excel = n_barang = 0
+        st.caption(
+            "Menampilkan klasifikasi **gabungan**: memakai tag KATEGORI PILAR asli Excel kalau tersedia dan "
+            "spesifik, dan otomatis melengkapi dengan KATEGORI BARANG untuk transaksi yang di kolom Excel "
+            "belum ada tag-nya (mis. sebelum Agustus 2026) atau isinya bukan kategori barang (PENJUALAN RITEL/"
+            "PENGADAAN CORPORATE) — jadi hasilnya tetap lengkap seperti Kategori Barang."
         )
-        if n_before:
-            caption_txt += f" ({format_number(n_before)} transaksi sebelum Agustus 2026 termasuk dalam hitungan ini.)"
-        st.caption(caption_txt)
-        if n_after and n_after_kosong:
+        if n_total:
             st.caption(
-                f"ℹ️ Untuk transaksi Agustus 2026 ke atas: {format_number(n_after_kosong)} dari "
-                f"{format_number(n_after)} baris masih belum ada nilai KATEGORI PILAR-nya."
+                f"ℹ️ Dari {format_number(n_total)} transaksi: {format_number(n_excel)} pakai tag langsung dari "
+                f"KATEGORI PILAR Excel, {format_number(n_barang)} dilengkapi dari KATEGORI BARANG."
             )
         pilar_summary_disp = build_pilar_summary(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
         pilar_by_branch_disp = build_pilar_by_branch(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
@@ -2837,6 +2935,35 @@ with tab7:
             if not str(r.get("Nama Project") or "").strip():
                 continue
             st.markdown(render_project_progress_bar(r), unsafe_allow_html=True)
+
+    st.markdown("<br/>", unsafe_allow_html=True)
+    if not _GH_OK:
+        st.warning(
+            "⚠️ Backup GitHub tidak aktif, jadi Project Tracker HANYA tersimpan di server aplikasi ini dan "
+            "bisa hilang kalau aplikasi restart/redeploy. Download backup di bawah ini setiap kali selesai "
+            "update project, supaya bisa dipulihkan lagi kalau datanya hilang."
+        )
+    bcol1, bcol2 = st.columns([1, 2])
+    with bcol1:
+        st.download_button(
+            "⬇️ Download Backup Project (Excel)",
+            data=export_projects_excel(df_projects),
+            file_name=f"backup_project_tracker_{date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with bcol2:
+        up_projects_backup = st.file_uploader(
+            "⬆️ Restore dari Backup (upload file hasil Download Backup di atas)",
+            type=["xlsx", "xls"], key="up_projects_backup",
+        )
+        if up_projects_backup is not None:
+            try:
+                restored = import_projects_excel(up_projects_backup)
+                _save_projects(restored)
+                st.success(f"{len(restored)} project berhasil dipulihkan dari backup.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Gagal membaca file backup: {e}")
 
     st.markdown("<br/>", unsafe_allow_html=True)
     st.markdown("###### Daftar Project")
