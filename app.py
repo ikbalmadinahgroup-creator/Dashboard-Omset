@@ -869,6 +869,15 @@ def _dedupe_main_files():
 def load_all_main_data() -> pd.DataFrame:
     if not os.path.isdir(MAIN_DATA_DIR):
         return pd.DataFrame()
+    # PENTING: jalankan dedupe di SETIAP load (bukan cuma saat upload baru).
+    # File export MFlash bersifat KUMULATIF PENUH dari awal kuartal setiap
+    # kali di-export ulang (bukan cuma data baru/incremental) - jadi kalau
+    # ada 2 file untuk cabang yang sama (mis. sisa dari restore GitHub, atau
+    # dedupe sebelumnya sempat gagal), transaksi yang tanggalnya tumpang
+    # tindih akan TERHITUNG DOBEL dan bikin Omset S/D Hari Ini jadi lebih
+    # besar dari yang sebenarnya. Jalankan di sini supaya selalu bersih
+    # sebelum data digabung & di-cache, apapun penyebab file duplikatnya.
+    _dedupe_main_files()
     cached = _load_cached_combined(MAIN_DATA_DIR, "main_combined", required_cols=["Pilar", "PilarExcel", "PilarSource"], schema_version=MAIN_DATA_SCHEMA_VERSION)
     if cached is not None:
         return cached
