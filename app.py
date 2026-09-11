@@ -191,18 +191,51 @@ def _gh_check_connection():
         return False, f"Gagal tersambung ke GitHub: {e}"
 
 
+_SYNC_DIR_PAIRS = [
+    ("data/main", "data/main"), ("data/ads", "data/ads"), ("data/walkin", "data/walkin"),
+    ("data/target", "data/target"), ("data/corp", "data/corp"), ("data/log", "data/log"),
+    ("data/projects", "data/projects"), ("data/_cache", "data/_cache"),
+]
+
+
 def sync_data_from_github():
+    """Restore file dari GitHub ke lokal (dipanggil di awal, setiap sesi)."""
     if not _GH_ENABLED:
         return
-    for remote_dir, local_dir in [
-        ("data/main", "data/main"), ("data/ads", "data/ads"), ("data/walkin", "data/walkin"),
-        ("data/target", "data/target"), ("data/corp", "data/corp"), ("data/log", "data/log"),
-        ("data/projects", "data/projects"), ("data/_cache", "data/_cache"),
-    ]:
+    for remote_dir, local_dir in _SYNC_DIR_PAIRS:
         for fname in github_list_dir(remote_dir):
             local_path = os.path.join(local_dir, fname)
             if not os.path.exists(local_path):
                 github_download_file(f"{remote_dir}/{fname}", local_path)
+
+
+def backfill_local_data_to_github():
+    """Upload file yang SUDAH ada di lokal tapi BELUM ada di GitHub (arah
+    sebaliknya dari sync_data_from_github). Ini menutup celah nyata: kalau
+    user upload data SEBELUM backup GitHub diaktifkan (mis. GITHUB_TOKEN baru
+    diisi belakangan), file itu cuma tersimpan lokal dan TIDAK PERNAH ke-
+    backup - begitu Streamlit Cloud restart (mis. gara-gara Secrets baru saja
+    disave), file lokal itu hilang total karena tidak pernah sempat masuk
+    GitHub. Fungsi ini menutup celah itu supaya begitu backup GitHub aktif,
+    SEMUA file yang sudah ada lokal langsung ikut ter-backup, bukan cuma
+    upload baru sesudahnya."""
+    if not _GH_ENABLED:
+        return
+    for remote_dir, local_dir in _SYNC_DIR_PAIRS:
+        if not os.path.isdir(local_dir):
+            continue
+        remote_files = set(github_list_dir(remote_dir))
+        for fname in os.listdir(local_dir):
+            fpath = os.path.join(local_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if fname in remote_files:
+                continue
+            try:
+                with open(fpath, "rb") as f:
+                    github_upload_file(f"{remote_dir}/{fname}", f.read(), "backfill: file lokal belum ada di GitHub")
+            except Exception:
+                pass
 
 
 # ========================= Cache helpers =========================
@@ -230,7 +263,7 @@ CACHE_DATA_DIR = os.path.join("data", "_cache")
 # berubah (mis. classify_pilar_hybrid), supaya cache parquet lama di disk/
 # GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
 # dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
-MAIN_DATA_SCHEMA_VERSION = 2
+MAIN_DATA_SCHEMA_VERSION = 3
 
 
 def _cache_paths(name: str):
@@ -437,16 +470,20 @@ def _extract_filename_timestamp(fname: str):
 
 # ========================= 6 Pilar MFlash =========================
 
-PILAR_ORDER = ["Handphone", "Laptop", "Aksesoris", "Voucher & Perdana", "Service", "Lainnya"]
+# 6 Pilar MFlash yang BENAR (dikonfirmasi user) adalah kategori JENIS TRANSAKSI,
+# bukan jenis barang: Service, Penjualan Ritel, Sewa, Maintenance, Pengadaan,
+# Internet Provider. "Lainnya" adalah bucket tambahan di luar 6 pilar resmi
+# untuk transaksi yang tidak bisa diklasifikasikan ke salah satu dari 6 itu.
+PILAR_ORDER = ["Service", "Penjualan Ritel", "Sewa", "Maintenance", "Pengadaan", "Internet Provider", "Lainnya"]
 PILAR_ICONS = {
-    "Handphone": "📱", "Laptop": "💻", "Aksesoris": "🎧",
-    "Voucher & Perdana": "🎫", "Service": "🔧", "Lainnya": "📦",
+    "Service": "🔧", "Penjualan Ritel": "🛒", "Sewa": "🏠",
+    "Maintenance": "🛠️", "Pengadaan": "📦", "Internet Provider": "🌐", "Lainnya": "📁",
 }
 PILAR_COLORS = {
-    "Handphone": "#2563eb", "Laptop": "#7c3aed", "Aksesoris": "#d97706",
-    "Voucher & Perdana": "#059669", "Service": "#dc2626", "Lainnya": "#6b7280",
+    "Service": "#dc2626", "Penjualan Ritel": "#2563eb", "Sewa": "#7c3aed",
+    "Maintenance": "#d97706", "Pengadaan": "#059669", "Internet Provider": "#0891b2", "Lainnya": "#6b7280",
 }
-_PILAR_SHOW_QTY = {"Handphone", "Laptop", "Aksesoris", "Voucher & Perdana", "Lainnya"}
+_PILAR_SHOW_QTY = {"Penjualan Ritel", "Pengadaan", "Lainnya"}
 
 
 def _pilar_label(p: str) -> str:
@@ -454,35 +491,24 @@ def _pilar_label(p: str) -> str:
 
 
 def _find_pilar_column_index(col_idx: dict):
-    """Cari kolom sumber klasifikasi 6 Pilar MFlash.
-    Prioritas utama: 'KATEGORI BARANG' - kolom ini SELALU terisi penuh di file
-    ekspor asli (AKSESORIS, JASA, SPAREPART, HANDPHONE, LAPTOP, KARTU PERDANA,
-    dst) untuk setiap baris transaksi. Kolom 'KATEGORI PILAR ...' yang tadinya
-    dipakai ternyata sering kosong/NaN (di sample data hanya ~40% baris yang
-    terisi, dan nilainya pun beda konsep - SERVICE/PENJUALAN RITEL/PENGADAAN
-    CORPORATE, bukan 6 kategori Pilar) - itu sebabnya sebelumnya 6 Pilar cuma
-    kebaca 'Service' dan 'Lainnya' saja (mayoritas baris NaN -> default Lainnya)."""
+    """Cari kolom KATEGORI BARANG - dipakai sebagai PROKSI cadangan (bukan
+    sumber utama lagi) untuk transaksi yang kolom KATEGORI PILAR-nya kosong/
+    tidak spesifik, supaya klasifikasi 6 Pilar tetap lengkap untuk data lama
+    (sebelum kolom KATEGORI PILAR ada, mis. sebelum Agustus 2026)."""
     for header, idx in col_idx.items():
         if header == "KATEGORI BARANG":
             return idx
     for header, idx in col_idx.items():
         if "KATEGORI BARANG" in header:
             return idx
-    for header, idx in col_idx.items():
-        if header == "KATEGORI PILAR" or header == "PILAR":
-            return idx
-    for header, idx in col_idx.items():
-        if "PILAR" in header:
-            return idx
     return None
 
 
 def _find_pilar_excel_column_index(col_idx: dict):
-    """Cari kolom 'KATEGORI PILAR ...' asli dari Excel secara KHUSUS (terpisah
-    dari KATEGORI BARANG), dipakai sebagai sumber klasifikasi 6 Pilar
-    ALTERNATIF supaya bisa dibandingkan/cross-check dengan versi Kategori
-    Barang. Catatan: kolom ini di data asli sering kosong untuk sebagian
-    transaksi, jadi hasilnya bisa kurang lengkap dibanding Kategori Barang."""
+    """Cari kolom 'KATEGORI PILAR ...' asli dari Excel - ini SUMBER UTAMA untuk
+    6 Pilar resmi MFlash (Service/Penjualan Ritel/Sewa/Maintenance/Pengadaan/
+    Internet Provider). Kolom ini baru mulai diisi sistem MFlash sejak awal
+    Agustus 2026, jadi transaksi sebelum itu wajar kosong."""
     for header, idx in col_idx.items():
         if header == "KATEGORI PILAR" or header == "PILAR":
             return idx
@@ -492,38 +518,53 @@ def _find_pilar_excel_column_index(col_idx: dict):
     return None
 
 
-def classify_pilar(v) -> str:
-    """Klasifikasi 6 Pilar MFlash dari nilai kolom KATEGORI BARANG (utama) atau
-    KATEGORI PILAR (fallback jika KATEGORI BARANG tidak ada di file)."""
+def classify_pilar_official(v) -> str:
+    """Klasifikasi 6 Pilar RESMI MFlash langsung dari nilai kolom KATEGORI
+    PILAR di Excel (Service, Penjualan Ritel, Sewa, Maintenance, Pengadaan,
+    Internet Provider). Kembalikan 'Lainnya' kalau kosong atau tidak cocok
+    dengan salah satu dari 6 pilar resmi itu."""
     if not v:
         return "Lainnya"
     up = str(v).strip().upper()
-    if "HANDPHONE" in up or up == "HP":
-        return "Handphone"
-    if "LAPTOP" in up:
-        return "Laptop"
-    if "AKSESORIS" in up or "ACCESSORIES" in up:
-        return "Aksesoris"
-    if "PERDANA" in up or "VOUCHER" in up or "KARTU" in up:
-        return "Voucher & Perdana"
-    if "JASA" in up or "SPAREPART" in up or "SERVICE" in up:
+    if "SEWA" in up:
+        return "Sewa"
+    if "MAINTENANCE" in up or "MAINTAIN" in up:
+        return "Maintenance"
+    if "INTERNET" in up or "PROVIDER" in up:
+        return "Internet Provider"
+    if "PENGADAAN" in up:
+        return "Pengadaan"
+    if "RITEL" in up or "RETAIL" in up:
+        return "Penjualan Ritel"
+    if "SERVICE" in up:
         return "Service"
     return "Lainnya"
 
 
+def classify_pilar_barang_proxy(v) -> str:
+    """Proksi/perkiraan 6 Pilar dari kolom KATEGORI BARANG, dipakai HANYA
+    sebagai fallback ketika KATEGORI PILAR kosong (mis. transaksi sebelum
+    Agustus 2026). KATEGORI BARANG cuma bisa membedakan 'ini barang jasa/
+    sparepart perbaikan' vs 'ini barang dijual' - jadi hanya bisa menebak
+    Service vs Penjualan Ritel; TIDAK bisa mendeteksi Sewa/Maintenance/
+    Pengadaan/Internet Provider (bukan tentang jenis barang)."""
+    if not v:
+        return "Lainnya"
+    up = str(v).strip().upper()
+    if "JASA" in up or "SPAREPART" in up or "SERVICE" in up:
+        return "Service"
+    return "Penjualan Ritel"
+
+
 def classify_pilar_hybrid(pilar_excel_raw, kategori_barang_raw) -> str:
-    """Klasifikasi 6 Pilar GABUNGAN: utamakan nilai kolom KATEGORI PILAR asli
-    Excel kalau isinya sudah mengarah ke salah satu dari 6 Pilar (mis. suatu
-    saat ada export yang mengisi HANDPHONE/LAPTOP/dst langsung di kolom ini).
-    Kalau kolom itu kosong ATAU isinya bukan kategori barang spesifik (di data
-    MFlash yang ada sekarang, isinya cuma SERVICE/PENJUALAN RITEL/PENGADAAN
-    CORPORATE - dua yang terakhir tidak match ke Pilar manapun), otomatis
-    jatuh ke klasifikasi dari KATEGORI BARANG (kolom ini SELALU terisi penuh)
-    supaya hasilnya tetap lengkap dan tidak didominasi 'Lainnya'."""
-    excel_cls = classify_pilar(pilar_excel_raw)
+    """Klasifikasi 6 Pilar GABUNGAN (dipakai sebagai default/utama): utamakan
+    nilai kolom KATEGORI PILAR asli Excel (sumber resmi). Kalau kosong/tidak
+    cocok (mis. transaksi sebelum Agustus 2026 saat kolom itu belum ada),
+    fallback ke proksi dari KATEGORI BARANG supaya hasilnya tetap lengkap."""
+    excel_cls = classify_pilar_official(pilar_excel_raw)
     if excel_cls != "Lainnya":
         return excel_cls
-    return classify_pilar(kategori_barang_raw)
+    return classify_pilar_barang_proxy(kategori_barang_raw)
 
 
 def parse_bulan(v):
@@ -737,9 +778,9 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
             "Omset": total,
             "Qty": qty or 0.0,
             "GrossProfit": gp or 0.0,
-            "Pilar": classify_pilar(pilar_raw),
-            "PilarExcel": classify_pilar_hybrid(pilar_excel_raw, pilar_raw),
-            "PilarSource": "Excel" if classify_pilar(pilar_excel_raw) != "Lainnya" else "Barang",
+            "Pilar": classify_pilar_hybrid(pilar_excel_raw, pilar_raw),
+            "PilarExcel": classify_pilar_official(pilar_excel_raw),
+            "PilarSource": "Excel" if classify_pilar_official(pilar_excel_raw) != "Lainnya" else "Barang",
             "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "TIDAK DIKETAHUI",
             "PenjualKelompok": classify_mc_or_retail(kategori_pelanggan_raw),
         })
@@ -810,9 +851,9 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
             "Omset": total,
             "Qty": qty or 0.0,
             "GrossProfit": gp or 0.0,
-            "Pilar": classify_pilar(pilar_raw),
-            "PilarExcel": classify_pilar_hybrid(pilar_excel_raw, pilar_raw),
-            "PilarSource": "Excel" if classify_pilar(pilar_excel_raw) != "Lainnya" else "Barang",
+            "Pilar": classify_pilar_hybrid(pilar_excel_raw, pilar_raw),
+            "PilarExcel": classify_pilar_official(pilar_excel_raw),
+            "PilarSource": "Excel" if classify_pilar_official(pilar_excel_raw) != "Lainnya" else "Barang",
             "NamaPenjual": str(penjual_raw).strip() if penjual_raw else "TIDAK DIKETAHUI",
             "PenjualKelompok": classify_mc_or_retail(kategori_pelanggan_raw),
         })
@@ -2351,6 +2392,10 @@ if _GH_ENABLED and not st.session_state.get("_gh_synced"):
         sync_data_from_github()
     except Exception:
         pass
+    try:
+        backfill_local_data_to_github()
+    except Exception:
+        pass
     st.session_state["_gh_synced"] = True
 
 header_col1, header_col2 = st.columns([1, 6])
@@ -2783,17 +2828,18 @@ with tab5:
 
     pilar_source_label = st.radio(
         "Sumber klasifikasi 6 Pilar",
-        options=["KATEGORI BARANG (Rekomendasi)", "KATEGORI PILAR + KATEGORI BARANG (Gabungan)"],
+        options=["Gabungan (Rekomendasi)", "Hanya dari KATEGORI PILAR Excel (tanpa pelengkap)"],
         horizontal=True,
         key="pilar_source_tab5",
     )
-    if pilar_source_label.startswith("KATEGORI PILAR"):
-        pilar_col_selected = "PilarExcel"
-        # PilarExcel sekarang GABUNGAN: utamakan tag KATEGORI PILAR asli Excel
-        # kalau isinya spesifik; kalau kosong/tidak spesifik (mis. sebelum
-        # Agustus 2026 kolom ini belum ada, atau isinya PENJUALAN RITEL/
-        # PENGADAAN CORPORATE yang bukan kategori barang), otomatis pakai
-        # KATEGORI BARANG supaya hasilnya tetap lengkap (lihat classify_pilar_hybrid).
+    if pilar_source_label.startswith("Gabungan"):
+        pilar_col_selected = "Pilar"
+        # "Pilar" (default) = GABUNGAN: utamakan tag KATEGORI PILAR asli Excel
+        # (sumber resmi 6 Pilar: Service/Penjualan Ritel/Sewa/Maintenance/
+        # Pengadaan/Internet Provider). Kalau kosong/tidak cocok (mis. sebelum
+        # Agustus 2026 kolom ini belum ada), fallback ke proksi dari KATEGORI
+        # BARANG (JASA/SPAREPART -> Service, selain itu -> Penjualan Ritel)
+        # supaya hasilnya tetap lengkap.
         if not df_main.empty and "PilarSource" in df_main.columns:
             n_total = len(df_main)
             n_excel = int((df_main["PilarSource"] == "Excel").sum())
@@ -2801,23 +2847,29 @@ with tab5:
         else:
             n_total = n_excel = n_barang = 0
         st.caption(
-            "Menampilkan klasifikasi **gabungan**: memakai tag KATEGORI PILAR asli Excel kalau tersedia dan "
-            "spesifik, dan otomatis melengkapi dengan KATEGORI BARANG untuk transaksi yang di kolom Excel "
-            "belum ada tag-nya (mis. sebelum Agustus 2026) atau isinya bukan kategori barang (PENJUALAN RITEL/"
-            "PENGADAAN CORPORATE) — jadi hasilnya tetap lengkap seperti Kategori Barang."
+            "Menampilkan klasifikasi **gabungan**: memakai tag KATEGORI PILAR asli Excel (sumber resmi 6 Pilar) "
+            "kalau tersedia, dan otomatis melengkapi dengan proksi dari KATEGORI BARANG (JASA/SPAREPART → "
+            "Service, selain itu → Penjualan Ritel) untuk transaksi yang di kolom Excel belum ada tag-nya "
+            "(mis. sebelum Agustus 2026) — jadi hasilnya tetap lengkap. Catatan: proksi ini tidak bisa "
+            "mendeteksi Sewa/Maintenance/Pengadaan/Internet Provider (bukan soal jenis barang), jadi transaksi "
+            "lama yang sebenarnya salah satu dari 4 pilar itu mungkin ikut ter-hitung sebagai Service/Penjualan Ritel."
         )
         if n_total:
             st.caption(
                 f"ℹ️ Dari {format_number(n_total)} transaksi: {format_number(n_excel)} pakai tag langsung dari "
-                f"KATEGORI PILAR Excel, {format_number(n_barang)} dilengkapi dari KATEGORI BARANG."
+                f"KATEGORI PILAR Excel, {format_number(n_barang)} dilengkapi dari proksi KATEGORI BARANG."
             )
-        pilar_summary_disp = build_pilar_summary(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
-        pilar_by_branch_disp = build_pilar_by_branch(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
-    else:
-        pilar_col_selected = "Pilar"
-        st.caption("Menampilkan klasifikasi berdasarkan kolom **KATEGORI BARANG** (terisi penuh di setiap transaksi).")
         pilar_summary_disp = pilar_summary
         pilar_by_branch_disp = pilar_by_branch
+    else:
+        pilar_col_selected = "PilarExcel"
+        st.caption(
+            "Menampilkan HANYA tag yang benar-benar tercatat di kolom **KATEGORI PILAR** Excel, tanpa "
+            "pelengkap apa pun — transaksi yang kolomnya kosong (mis. sebelum Agustus 2026) akan masuk "
+            "'Lainnya'. Berguna untuk audit seberapa lengkap staf mengisi kolom ini."
+        )
+        pilar_summary_disp = build_pilar_summary(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
+        pilar_by_branch_disp = build_pilar_by_branch(df_main, selected_branches, tanggal_acuan, pilar_col="PilarExcel")
 
     if pilar_summary_disp.empty:
         st.info("Belum ada data 6 Pilar untuk periode ini.")
