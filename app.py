@@ -1157,7 +1157,18 @@ def load_walkin_data(path: str, cabang_hint=None) -> pd.DataFrame:
 
     idx_cabang = gi("CABANG")
     idx_tgl = gi("TANGGAL", "TGL PENGIRIMAN", "TGL")
-    idx_nomor = gi("NOMOR PENGIRIMAN", "NO PENGIRIMAN", "NOMOR")
+    # PENTING: header asli di file export MFlash adalah "NOMOR PENGIRIMAN
+    # PESANAN" (bukan cuma "NOMOR PENGIRIMAN") - ini sempat bikin SEMUA file
+    # Walk-in gagal terbaca (selalu 0 baris) karena gi() cuma cocok persis,
+    # tidak ketemu, jadi setiap baris dianggap tidak punya nomor & di-skip.
+    # Tambahkan pencarian substring sebagai jaring pengaman kalau suatu saat
+    # header-nya berubah lagi.
+    idx_nomor = gi("NOMOR PENGIRIMAN PESANAN", "NOMOR PENGIRIMAN", "NO PENGIRIMAN", "NOMOR")
+    if idx_nomor is None:
+        for header, hidx in col_idx.items():
+            if "PENGIRIMAN" in header and "NOMOR" in header:
+                idx_nomor = hidx
+                break
 
     cabang_fallback = cabang_hint or branch_from_filename(os.path.basename(path)) or branch_from_sheetname(sheet_name)
 
