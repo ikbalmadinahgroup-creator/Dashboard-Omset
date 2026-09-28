@@ -263,7 +263,7 @@ CACHE_DATA_DIR = os.path.join("data", "_cache")
 # berubah (mis. classify_pilar_hybrid), supaya cache parquet lama di disk/
 # GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
 # dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
-MAIN_DATA_SCHEMA_VERSION = 3
+MAIN_DATA_SCHEMA_VERSION = 4
 
 
 def _cache_paths(name: str):
@@ -358,6 +358,18 @@ BRANCH_ORDER = [
     "TELUKJ", "JATIWARINGIN", "CIKAMPEK", "CILANGKAP", "PEJATEN", "CIBUBUR",
 ]
 _BRANCH_RANK = {b: i for i, b in enumerate(BRANCH_ORDER)}
+
+# Nama cabang alternatif -> nama baku di BRANCH_ORDER. File Dashboard 6 Pilar
+# (hasil rekap Excel) menulis cabang Teluk Jambe sebagai "KARAWANG", sedangkan
+# dashboard ini & file target memakai "TELUKJ".
+_BRANCH_ALIASES = {"KARAWANG": "TELUKJ", "TELUK JAMBE": "TELUKJ", "TELUKJAMBE": "TELUKJ"}
+
+
+def normalize_branch(name):
+    if not name:
+        return name
+    up = str(name).strip().upper()
+    return _BRANCH_ALIASES.get(up, up)
 
 BULAN_ID = {
     1: "Januari", 2: "Februari", 3: "Maret", 4: "April", 5: "Mei", 6: "Juni",
@@ -762,7 +774,7 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
         if total is None:
             continue
         cabang = _nan_to_none(row[idx_cabang]) if idx_cabang is not None and idx_cabang < len(row) else None
-        cabang = str(cabang).strip().upper() if cabang else cabang_fallback
+        cabang = normalize_branch(cabang) if cabang else cabang_fallback
         tgl = to_date(row[idx_tgl]) if idx_tgl is not None and idx_tgl < len(row) else None
         kategori_raw = _nan_to_none(row[idx_kategori]) if idx_kategori is not None and idx_kategori < len(row) else None
         kategori_pelanggan_raw = _nan_to_none(row[idx_kategori_pelanggan]) if idx_kategori_pelanggan is not None and idx_kategori_pelanggan < len(row) else None
@@ -835,7 +847,7 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
         if total is None:
             continue
         cabang = _nan_to_none(row[idx_cabang]) if idx_cabang is not None and idx_cabang < len(row) else None
-        cabang = str(cabang).strip().upper() if cabang else None
+        cabang = normalize_branch(cabang) if cabang else None
         tgl = to_date(row[idx_tgl]) if idx_tgl is not None and idx_tgl < len(row) else None
         kategori_raw = _nan_to_none(row[idx_kategori]) if idx_kategori is not None and idx_kategori < len(row) else None
         kategori_pelanggan_raw = _nan_to_none(row[idx_kategori_pelanggan]) if idx_kategori_pelanggan is not None and idx_kategori_pelanggan < len(row) else None
@@ -889,6 +901,15 @@ def _dedupe_main_files():
     files = [f for f in os.listdir(MAIN_DATA_DIR) if f.lower().endswith((".xlsx", ".xls"))]
     groups = {}
     for f in files:
+        if "DASHBOARD_6_PILAR" in f.upper().replace(" ", "_"):
+            # File rekap Dashboard 6 Pilar berisi SEMUA cabang sekaligus -
+            # simpan hanya yang paling baru (berdasar waktu ubah file).
+            try:
+                ts = f"{os.path.getmtime(os.path.join(MAIN_DATA_DIR, f)):020.6f}"
+            except OSError:
+                ts = ""
+            groups.setdefault("__DASHBOARD__", []).append((ts, f))
+            continue
         branch = branch_from_filename(f) or "UNKNOWN"
         ts = _extract_filename_timestamp(f) or ""
         groups.setdefault(branch, []).append((ts, f))
@@ -1180,7 +1201,7 @@ def load_walkin_data(path: str, cabang_hint=None) -> pd.DataFrame:
         if nomor is None:
             continue
         cabang = _nan_to_none(row[idx_cabang]) if idx_cabang is not None and idx_cabang < len(row) else None
-        cabang = str(cabang).strip().upper() if cabang else cabang_fallback
+        cabang = normalize_branch(cabang) if cabang else cabang_fallback
         tgl = to_date(row[idx_tgl]) if idx_tgl is not None and idx_tgl < len(row) else None
         records.append({
             "Cabang": cabang,
