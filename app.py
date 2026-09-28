@@ -161,6 +161,22 @@ def github_list_dir(path: str):
     return []
 
 
+def github_list_dir_meta(path: str):
+    """Seperti github_list_dir, tapi mengembalikan (ok, {nama: size}). ok=False
+    kalau request gagal - supaya pemanggil tidak salah mengira folder kosong."""
+    token, repo, branch = _gh_config()
+    url = f"https://api.github.com/repos/{repo}/contents/{path}"
+    try:
+        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
+        if r.status_code == 200:
+            return True, {item["name"]: item.get("size") for item in r.json() if item["type"] == "file"}
+        if r.status_code == 404:
+            return True, {}
+    except Exception:
+        pass
+    return False, {}
+
+
 def _gh_check_connection():
     """Tes koneksi GitHub SATU KALI (dipanggil sekali per sesi lewat
     st.session_state) untuk memastikan backup otomatis benar-benar aktif dan
@@ -198,15 +214,36 @@ _SYNC_DIR_PAIRS = [
 ]
 
 
+# Folder yang isinya DIKELOLA dari GitHub (GitHub = sumber kebenaran):
+# file lokal yang sudah dihapus di GitHub ikut dihapus, file yang isinya beda
+# di-download ulang, dan TIDAK di-backfill balik ke GitHub. Tanpa ini, file
+# lama yang masih tersisa di container (mis. 18 file cabang lama) akan
+# di-upload lagi oleh backfill dan omset terhitung dobel.
+_MIRRORED_DIRS = {"data/main", "data/_cache", "data/log"}
+
+
 def sync_data_from_github():
     """Restore file dari GitHub ke lokal (dipanggil di awal, setiap sesi)."""
     if not _GH_ENABLED:
         return
     for remote_dir, local_dir in _SYNC_DIR_PAIRS:
-        for fname in github_list_dir(remote_dir):
+        ok, remote = github_list_dir_meta(remote_dir)
+        if not ok:
+            continue
+        for fname, size in remote.items():
             local_path = os.path.join(local_dir, fname)
-            if not os.path.exists(local_path):
+            stale = (remote_dir in _MIRRORED_DIRS and os.path.exists(local_path)
+                     and size is not None and os.path.getsize(local_path) != size)
+            if not os.path.exists(local_path) or stale:
                 github_download_file(f"{remote_dir}/{fname}", local_path)
+        if remote_dir in _MIRRORED_DIRS and os.path.isdir(local_dir):
+            for fname in os.listdir(local_dir):
+                fpath = os.path.join(local_dir, fname)
+                if os.path.isfile(fpath) and fname not in remote:
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
 
 
 def backfill_local_data_to_github():
@@ -222,7 +259,7 @@ def backfill_local_data_to_github():
     if not _GH_ENABLED:
         return
     for remote_dir, local_dir in _SYNC_DIR_PAIRS:
-        if not os.path.isdir(local_dir):
+        if remote_dir in _MIRRORED_DIRS or not os.path.isdir(local_dir):
             continue
         remote_files = set(github_list_dir(remote_dir))
         for fname in os.listdir(local_dir):
@@ -263,7 +300,7 @@ CACHE_DATA_DIR = os.path.join("data", "_cache")
 # berubah (mis. classify_pilar_hybrid), supaya cache parquet lama di disk/
 # GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
 # dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
-MAIN_DATA_SCHEMA_VERSION = 4
+MAIN_DATA_SCHEMA_VERSION = 5
 
 
 def _cache_paths(name: str):
@@ -894,6 +931,10 @@ def _load_main_data_cached(path: str, mtime: float, size: int) -> pd.DataFrame:
     return load_main_data(path)
 
 
+def _is_dashboard_file(fname: str) -> bool:
+    return "DASHBOARD_6_PILAR" in str(fname).upper().replace(" ", "_")
+
+
 def _dedupe_main_files():
     """Hapus file Omset duplikat/basi per cabang, sisakan yang timestamp-nya terbaru."""
     if not os.path.isdir(MAIN_DATA_DIR):
@@ -901,13 +942,13 @@ def _dedupe_main_files():
     files = [f for f in os.listdir(MAIN_DATA_DIR) if f.lower().endswith((".xlsx", ".xls"))]
     groups = {}
     for f in files:
-        if "DASHBOARD_6_PILAR" in f.upper().replace(" ", "_"):
+        if _is_dashboard_file(f):
             # File rekap Dashboard 6 Pilar berisi SEMUA cabang sekaligus -
             # simpan hanya yang paling baru (berdasar waktu ubah file).
             try:
-                ts = f"{os.path.getmtime(os.path.join(MAIN_DATA_DIR, f)):020.6f}"
+                ts = f"{os.path.getmtime(os.path.join(MAIN_DATA_DIR, f)):020.6f}|{f}"
             except OSError:
-                ts = ""
+                ts = f
             groups.setdefault("__DASHBOARD__", []).append((ts, f))
             continue
         branch = branch_from_filename(f) or "UNKNOWN"
@@ -944,9 +985,13 @@ def load_all_main_data() -> pd.DataFrame:
     if cached is not None:
         return cached
     frames = []
-    for fname in sorted(os.listdir(MAIN_DATA_DIR)):
-        if not fname.lower().endswith((".xlsx", ".xls")):
-            continue
+    main_files = [f for f in sorted(os.listdir(MAIN_DATA_DIR)) if f.lower().endswith((".xlsx", ".xls"))]
+    # File rekap Dashboard 6 Pilar sudah berisi SEMUA cabang. Kalau ada, file
+    # per cabang (rincian_faktur_penjualan_*) diabaikan supaya tidak dobel.
+    dash_files = [f for f in main_files if _is_dashboard_file(f)]
+    if dash_files:
+        main_files = dash_files[-1:]
+    for fname in main_files:
         fpath = os.path.join(MAIN_DATA_DIR, fname)
         try:
             stat_ = os.stat(fpath)
@@ -2145,6 +2190,11 @@ def _read_log() -> pd.DataFrame:
 def _upsert_log(df_new: pd.DataFrame):
     os.makedirs(LOG_DIR, exist_ok=True)
     existing = _read_log()
+    # Snapshot baru untuk suatu tanggal menggantikan SELURUH snapshot lama
+    # tanggal itu (bukan per cabang) - supaya baris basi (mis. nama cabang
+    # lama, atau angka dobel) tidak tertinggal.
+    if not existing.empty and "Tanggal" in df_new.columns:
+        existing = existing[~existing["Tanggal"].isin(set(df_new["Tanggal"]))]
     combined = pd.concat([existing, df_new], ignore_index=True)
     combined = combined.drop_duplicates(subset=["Tanggal", "Cabang", "Kategori"], keep="last")
     combined.to_csv(_LOG_PATH, index=False)
