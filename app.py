@@ -300,7 +300,7 @@ CACHE_DATA_DIR = os.path.join("data", "_cache")
 # berubah (mis. classify_pilar_hybrid), supaya cache parquet lama di disk/
 # GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
 # dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
-MAIN_DATA_SCHEMA_VERSION = 6
+MAIN_DATA_SCHEMA_VERSION = 7
 
 
 def _cache_paths(name: str):
@@ -521,16 +521,17 @@ def _extract_filename_timestamp(fname: str):
 
 # 6 Pilar MFlash yang BENAR (dikonfirmasi user) adalah kategori JENIS TRANSAKSI,
 # bukan jenis barang: Service, Penjualan Ritel, Sewa, Maintenance, Pengadaan,
-# Internet Provider. "Lainnya" adalah bucket tambahan di luar 6 pilar resmi
+# Internet Provider, ditambah Cicilan Syariah (ada di kolom KATEGORI PILAR
+# Excel sejak Agustus 2026). "Lainnya" adalah bucket tambahan di luar 6 pilar resmi
 # untuk transaksi yang tidak bisa diklasifikasikan ke salah satu dari 6 itu.
-PILAR_ORDER = ["Service", "Penjualan Ritel", "Sewa", "Maintenance", "Pengadaan", "Internet Provider", "Lainnya"]
+PILAR_ORDER = ["Service", "Penjualan Ritel", "Sewa", "Maintenance", "Pengadaan", "Cicilan Syariah", "Internet Provider", "Lainnya"]
 PILAR_ICONS = {
     "Service": "🔧", "Penjualan Ritel": "🛒", "Sewa": "🏠",
-    "Maintenance": "🛠️", "Pengadaan": "📦", "Internet Provider": "🌐", "Lainnya": "📁",
+    "Maintenance": "🛠️", "Pengadaan": "📦", "Cicilan Syariah": "💳", "Internet Provider": "🌐", "Lainnya": "📁",
 }
 PILAR_COLORS = {
     "Service": "#dc2626", "Penjualan Ritel": "#2563eb", "Sewa": "#7c3aed",
-    "Maintenance": "#d97706", "Pengadaan": "#059669", "Internet Provider": "#0891b2", "Lainnya": "#6b7280",
+    "Maintenance": "#d97706", "Pengadaan": "#059669", "Cicilan Syariah": "#be185d", "Internet Provider": "#0891b2", "Lainnya": "#6b7280",
 }
 _PILAR_SHOW_QTY = {"Penjualan Ritel", "Pengadaan", "Lainnya"}
 
@@ -602,6 +603,8 @@ def classify_pilar_official(v) -> str:
         return "Internet Provider"
     if "PENGADAAN" in up:
         return "Pengadaan"
+    if "CICILAN" in up or "SYARIAH" in up:
+        return "Cicilan Syariah"
     if "RITEL" in up or "RETAIL" in up:
         return "Penjualan Ritel"
     if "SERVICE" in up:
