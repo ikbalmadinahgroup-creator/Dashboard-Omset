@@ -300,7 +300,7 @@ CACHE_DATA_DIR = os.path.join("data", "_cache")
 # berubah (mis. classify_pilar_hybrid), supaya cache parquet lama di disk/
 # GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
 # dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
-MAIN_DATA_SCHEMA_VERSION = 5
+MAIN_DATA_SCHEMA_VERSION = 6
 
 
 def _cache_paths(name: str):
@@ -567,6 +567,25 @@ def _find_pilar_excel_column_index(col_idx: dict):
     return None
 
 
+def _guess_blank_pilar_column(raw: pd.DataFrame, header_row):
+    """File rekap Dashboard 6 Pilar (sheet 'Faktur Penjualan') menyimpan
+    KATEGORI PILAR di kolom yang judulnya KOSONG (kolom AR). Kalau kolom
+    berjudul PILAR tidak ditemukan, cari kolom tanpa judul yang isinya
+    mayoritas nilai 6 Pilar resmi."""
+    best, best_hits = None, 0
+    for i, h in enumerate(header_row):
+        if _nan_to_none(h) is not None:
+            continue
+        vals = raw.iloc[1:, i].dropna() if i < raw.shape[1] else pd.Series([], dtype=object)
+        vals = vals[vals.astype(str).str.strip() != ""].head(3000)
+        if len(vals) < 20:
+            continue
+        hits = sum(1 for v in vals if classify_pilar_official(v) != "Lainnya")
+        if hits / len(vals) >= 0.8 and hits > best_hits:
+            best, best_hits = i, hits
+    return best
+
+
 def classify_pilar_official(v) -> str:
     """Klasifikasi 6 Pilar RESMI MFlash langsung dari nilai kolom KATEGORI
     PILAR di Excel (Service, Penjualan Ritel, Sewa, Maintenance, Pengadaan,
@@ -799,6 +818,8 @@ def _load_faktur_sheet(path: str, cabang_hint=None) -> pd.DataFrame:
     idx_gp = gi("GROSS PROFIT")
     idx_pilar = _find_pilar_column_index(col_idx)
     idx_pilar_excel = _find_pilar_excel_column_index(col_idx)
+    if idx_pilar_excel is None:
+        idx_pilar_excel = _guess_blank_pilar_column(raw, header_row)
     idx_penjual = _find_penjual_column_index(col_idx)
 
     cabang_fallback = cabang_hint or branch_from_filename(os.path.basename(path)) or branch_from_sheetname(sheet_name)
@@ -874,6 +895,8 @@ def _load_master_sheet(path: str) -> pd.DataFrame:
     idx_gp = gi("GROSS PROFIT")
     idx_pilar = _find_pilar_column_index(col_idx)
     idx_pilar_excel = _find_pilar_excel_column_index(col_idx)
+    if idx_pilar_excel is None:
+        idx_pilar_excel = _guess_blank_pilar_column(raw, header_row)
     idx_penjual = _find_penjual_column_index(col_idx)
 
     records = []
