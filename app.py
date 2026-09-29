@@ -301,6 +301,7 @@ CACHE_DATA_DIR = os.path.join("data", "_cache")
 # GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
 # dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
 MAIN_DATA_SCHEMA_VERSION = 7
+WALKIN_SCHEMA_VERSION = 2
 
 
 def _cache_paths(name: str):
@@ -1239,6 +1240,8 @@ def load_walkin_data(path: str, cabang_hint=None) -> pd.DataFrame:
 
     header_row = list(raw.iloc[0])
     col_idx = _build_col_idx(header_row)
+    if "NO FAKTUR" in col_idx:
+        return _load_walkin_faktur(raw, col_idx, cabang_hint or branch_from_filename(os.path.basename(path)) or branch_from_sheetname(sheet_name))
     rows_iter = (tuple(r) for r in raw.iloc[1:].itertuples(index=False, name=None))
 
     def gi(*names):
@@ -1248,6 +1251,7 @@ def load_walkin_data(path: str, cabang_hint=None) -> pd.DataFrame:
         return None
 
     idx_cabang = gi("CABANG")
+    idx_status = gi("STATUS PENGERJAAN")
     idx_tgl = gi("TANGGAL", "TGL PENGIRIMAN", "TGL")
     # PENTING: header asli di file export MFlash adalah "NOMOR PENGIRIMAN
     # PESANAN" (bukan cuma "NOMOR PENGIRIMAN") - ini sempat bikin SEMUA file
@@ -1274,10 +1278,13 @@ def load_walkin_data(path: str, cabang_hint=None) -> pd.DataFrame:
         cabang = _nan_to_none(row[idx_cabang]) if idx_cabang is not None and idx_cabang < len(row) else None
         cabang = normalize_branch(cabang) if cabang else cabang_fallback
         tgl = to_date(row[idx_tgl]) if idx_tgl is not None and idx_tgl < len(row) else None
+        status = _nan_to_none(row[idx_status]) if idx_status is not None and idx_status < len(row) else None
         records.append({
             "Cabang": cabang,
             "Tanggal": tgl,
             "NomorPengiriman": str(nomor).strip(),
+            "Sumber": "Pesanan (DO)",
+            "Status": str(status).strip().upper() if status else "",
         })
     if not records:
         return pd.DataFrame()
@@ -1285,6 +1292,50 @@ def load_walkin_data(path: str, cabang_hint=None) -> pd.DataFrame:
     df["Tahun"] = df["Tanggal"].apply(lambda d: d.year if d else None)
     df["Bulan"] = df["Tanggal"].apply(lambda d: d.month if d else None)
     return df
+
+
+def _load_walkin_faktur(raw: pd.DataFrame, col_idx: dict, cabang) -> pd.DataFrame:
+    """File Rincian Faktur Penjualan KHUSUS WALK-IN (format yang punya kolom
+    'Nomor # Pengiriman Pesanan'). Aturan walk-in MFlash (dikonfirmasi user):
+    - faktur yang punya nomor pengiriman pesanan (DO) TIDAK dihitung lagi -
+      kunjungannya sudah terhitung dari file Rincian Pengiriman Pesanan
+      (1 DO = 1 walk-in, termasuk yang cancel);
+    - faktur TANPA DO (konsumen datang & langsung beli) = 1 walk-in per nomor
+      faktur, di tanggal faktur.
+    File ini TIDAK dipakai untuk omset (omset tetap dari Dashboard 6 Pilar)."""
+    idx_fp = col_idx.get("NO FAKTUR")
+    idx_tgl = col_idx.get("TGL FAKTUR")
+    idx_do = None
+    for header, hidx in col_idx.items():
+        if "PENGIRIMAN" in header and ("NOMOR" in header or "NO" in header.split()):
+            idx_do = hidx
+            break
+    if idx_fp is None or idx_tgl is None:
+        return pd.DataFrame()
+    body = raw.iloc[1:]
+    df = pd.DataFrame({
+        "fp": body.iloc[:, idx_fp],
+        "tgl": body.iloc[:, idx_tgl],
+        "do": body.iloc[:, idx_do] if idx_do is not None else None,
+    }).dropna(subset=["fp"])
+    if df.empty:
+        return pd.DataFrame()
+    df["fp"] = df["fp"].astype(str).str.strip()
+    has_do = df.groupby("fp")["do"].apply(lambda s: s.notna().any() and (s.astype(str).str.strip() != "").any())
+    tgl = df.groupby("fp")["tgl"].min()
+    langsung = [fp for fp, v in has_do.items() if not v]
+    if not langsung:
+        return pd.DataFrame()
+    out = pd.DataFrame({
+        "Cabang": cabang,
+        "Tanggal": [to_date(tgl[fp]) for fp in langsung],
+        "NomorPengiriman": ["FP|" + fp for fp in langsung],
+        "Sumber": "Beli Langsung",
+        "Status": "",
+    })
+    out["Tahun"] = out["Tanggal"].apply(lambda d: d.year if d else None)
+    out["Bulan"] = out["Tanggal"].apply(lambda d: d.month if d else None)
+    return out
 
 
 @st.cache_data(show_spinner=False)
@@ -1297,7 +1348,7 @@ def _load_walkin_data_cached(path: str, mtime: float, size: int) -> pd.DataFrame
 def load_all_walkin_data() -> pd.DataFrame:
     if not os.path.isdir(WALKIN_DATA_DIR):
         return pd.DataFrame()
-    cached = _load_cached_combined(WALKIN_DATA_DIR, "walkin_combined")
+    cached = _load_cached_combined(WALKIN_DATA_DIR, "walkin_combined", required_cols=["Sumber"], schema_version=WALKIN_SCHEMA_VERSION)
     if cached is not None:
         return cached
     frames = []
@@ -1317,7 +1368,7 @@ def load_all_walkin_data() -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.dropna(subset=["Cabang", "Tanggal"])
     combined = combined.drop_duplicates(subset=["Cabang", "NomorPengiriman"])
-    _save_cached_combined(WALKIN_DATA_DIR, "walkin_combined", combined)
+    _save_cached_combined(WALKIN_DATA_DIR, "walkin_combined", combined, schema_version=WALKIN_SCHEMA_VERSION)
     return combined
 
 
@@ -1331,6 +1382,31 @@ def aggregate_walkin_monthly(df: pd.DataFrame) -> pd.DataFrame:
         rata2 = total / hari_dalam_bulan if hari_dalam_bulan else 0.0
         rows.append({"Cabang": cabang, "Tahun": tahun, "Bulan": bulan, "TotalWalkin": int(total), "RataRataPerHari": rata2})
     return pd.DataFrame(rows)
+
+
+def aggregate_walkin_monthly_split(df: pd.DataFrame, tanggal_acuan: date) -> pd.DataFrame:
+    """Walk-in per cabang per bulan di kuartal berjalan (s/d tanggal_acuan),
+    dipecah Pesanan (DO) vs Beli Langsung."""
+    if df.empty:
+        return pd.DataFrame()
+    q_start, _, _, _, _ = _quarter_bounds_for(tanggal_acuan)
+    sub = df[(df["Tanggal"] >= q_start) & (df["Tanggal"] <= tanggal_acuan)].copy()
+    if sub.empty:
+        return pd.DataFrame()
+    if "Sumber" not in sub.columns:
+        sub["Sumber"] = "Pesanan (DO)"
+    g = sub.groupby(["Cabang", "Bulan", "Sumber"])["NomorPengiriman"].nunique().unstack("Sumber", fill_value=0).reset_index()
+    for c in ["Pesanan (DO)", "Beli Langsung"]:
+        if c not in g.columns:
+            g[c] = 0
+    g["Total"] = g["Pesanan (DO)"] + g["Beli Langsung"]
+    def _hari(b):
+        b = int(b)
+        last = calendar.monthrange(tanggal_acuan.year, b)[1]
+        return tanggal_acuan.day if b == tanggal_acuan.month else last
+    g["Hari"] = g["Bulan"].apply(_hari)
+    g["RataRataPerHari"] = g["Total"] / g["Hari"]
+    return g
 
 
 def _quarter_bounds_for(d: date):
@@ -2601,7 +2677,8 @@ with st.sidebar.expander("📢 Data Iklan (Meta Ads)", expanded=False):
             st.rerun()
 
 with st.sidebar.expander("🚶 Data Walk-in", expanded=False):
-    up_walkin = st.file_uploader("Upload file Rincian Pengiriman Pesanan", type=["xlsx", "xls"], accept_multiple_files=True, key="up_walkin")
+    st.caption("Upload 2 file per cabang: Rincian Pengiriman Pesanan + Rincian Faktur Penjualan (format walk-in, ada kolom Nomor Pengiriman Pesanan).")
+    up_walkin = st.file_uploader("Upload file Walk-in", type=["xlsx", "xls"], accept_multiple_files=True, key="up_walkin")
     if up_walkin:
         for f in up_walkin:
             fpath = os.path.join(WALKIN_DATA_DIR, f.name)
@@ -2928,7 +3005,7 @@ with tab3:
 with tab4:
     st.subheader(f"🚶 Walk-in — {quarter_period_label}")
     if walkin_current.empty:
-        st.info("Belum ada data Walk-in untuk periode ini. Upload file Rincian Pengiriman Pesanan lewat sidebar.")
+        st.info("Belum ada data Walk-in untuk periode ini. Upload file Rincian Pengiriman Pesanan + Faktur Penjualan (walk-in) lewat sidebar.")
     else:
         overall_avg = _walkin_overall_avg(walkin_current)
         overall_avg_per_hari = float(walkin_current["RataRataPerHari"].mean()) if "RataRataPerHari" in walkin_current.columns else 0.0
@@ -2952,6 +3029,28 @@ with tab4:
                                      text=[format_number(v) for v in walkin_current["TotalWalkin"]], textposition="outside"))
         fig_walkin.update_layout(height=340, margin=dict(t=20, b=10, l=10, r=10), xaxis_title="Cabang", yaxis_title="Total Walk-in")
         st.plotly_chart(fig_walkin, use_container_width=True, key="chart_walkin_branch")
+
+        wk_month = aggregate_walkin_monthly_split(df_walkin[df_walkin["Cabang"].isin(selected_branches)], tanggal_acuan)
+        if not wk_month.empty:
+            st.markdown("###### 📅 Walk-in per Bulan")
+            st.caption("1 nomor pengiriman pesanan (DO) = 1 walk-in (termasuk cancel). Faktur tanpa DO = 1 walk-in (beli langsung). "
+                       "Faktur yang punya DO tidak dihitung lagi.")
+            bulan_list = sorted(wk_month["Bulan"].unique())
+            tbl = wk_month.pivot_table(index="Cabang", columns="Bulan", values="Total", aggfunc="sum", fill_value=0)
+            tbl = tbl.reindex(columns=bulan_list)
+            tbl.columns = [BULAN_ID.get(int(b), str(b)) for b in tbl.columns]
+            tbl["TOTAL"] = tbl.sum(axis=1)
+            tbl = tbl.reset_index()
+            tbl = _walkin_ordered(tbl)
+            tot = tbl.drop(columns=["Cabang"]).sum()
+            tbl = pd.concat([tbl, pd.DataFrame([{"Cabang": "TOTAL", **tot.to_dict()}])], ignore_index=True)
+            st.dataframe(tbl, use_container_width=True, hide_index=True)
+            with st.expander("Rincian: Pesanan (DO) vs Beli Langsung per bulan"):
+                det = wk_month.copy()
+                det["Bulan"] = det["Bulan"].apply(lambda b: BULAN_ID.get(int(b), str(b)))
+                det["RataRataPerHari"] = det["RataRataPerHari"].round(1)
+                det = _walkin_ordered(det)[["Cabang", "Bulan", "Pesanan (DO)", "Beli Langsung", "Total", "Hari", "RataRataPerHari"]]
+                st.dataframe(det.rename(columns={"RataRataPerHari": "Rata-rata / Hari"}), use_container_width=True, hide_index=True)
 
         walkin_insights = generate_walkin_insights(walkin_current)
         if walkin_insights:
