@@ -46,6 +46,7 @@ berubah, bukan di setiap rerun.
 
 import base64
 import calendar
+import math
 import io
 import os
 import re
@@ -140,9 +141,14 @@ def github_download_file(path: str, local_path: str):
     token, repo, branch = _gh_config()
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     try:
-        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
-        if r.status_code == 200:
-            content = base64.b64decode(r.json()["content"])
+        # PENTING: pakai media type RAW. Dengan JSON biasa, GitHub mengosongkan
+        # field "content" untuk file > 1 MB, sehingga file tersimpan 0 byte
+        # (ini yang bikin data walk-in Cilangkap & Karawang sempat tidak terbaca).
+        headers = dict(_gh_headers())
+        headers["Accept"] = "application/vnd.github.raw"
+        r = requests.get(url, headers=headers, params={"ref": branch}, timeout=60)
+        if r.status_code == 200 and r.content:
+            content = r.content
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             with open(local_path, "wb") as f:
                 f.write(content)
@@ -304,7 +310,7 @@ CACHE_DATA_DIR = os.path.join("data", "_cache")
 # GitHub otomatis dianggap usang dan di-parse ulang dari Excel - bukan cuma
 # dipakai apa adanya walau isinya sudah tidak sesuai app.py yang baru.
 MAIN_DATA_SCHEMA_VERSION = 7
-WALKIN_SCHEMA_VERSION = 2
+WALKIN_SCHEMA_VERSION = 3
 
 
 def _cache_paths(name: str):
@@ -1403,13 +1409,28 @@ def aggregate_walkin_monthly_split(df: pd.DataFrame, tanggal_acuan: date) -> pd.
         if c not in g.columns:
             g[c] = 0
     g["Total"] = g["Pesanan (DO)"] + g["Beli Langsung"]
-    def _hari(b):
-        b = int(b)
-        last = calendar.monthrange(tanggal_acuan.year, b)[1]
-        return tanggal_acuan.day if b == tanggal_acuan.month else last
-    g["Hari"] = g["Bulan"].apply(_hari)
-    g["RataRataPerHari"] = g["Total"] / g["Hari"]
+    data_last = min(tanggal_acuan, sub["Tanggal"].max())
+    first_day = df.groupby("Cabang")["Tanggal"].min().to_dict()
+    def _hari(row):
+        b = int(row["Bulan"])
+        m_start = date(tanggal_acuan.year, b, 1)
+        m_end = date(tanggal_acuan.year, b, calendar.monthrange(tanggal_acuan.year, b)[1])
+        start = max(m_start, first_day.get(row["Cabang"], m_start))
+        end = min(m_end, data_last)
+        return max(0, (end - start).days + 1)
+    g["Hari"] = g.apply(_hari, axis=1)
+    g["RataRataPerHari"] = g.apply(lambda r: _ceil_avg(r["Total"], r["Hari"]), axis=1)
     return g
+
+
+def _ceil_avg(total, hari) -> int:
+    """Rata-rata walk-in per hari, DIBULATKAN KE ATAS tanpa koma (permintaan
+    user: mis. 30,4 -> 31). Hari = hari aktif: sejak data pertama cabang
+    (cabang baru) s/d tanggal data terakhir (bukan hari ini kalau data belum
+    masuk)."""
+    if not hari:
+        return 0
+    return int(math.ceil(round(float(total) / float(hari), 9)))
 
 
 def _quarter_bounds_for(d: date):
@@ -1449,7 +1470,8 @@ def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date) -> pd
     month_start = date(tanggal_acuan.year, tanggal_acuan.month, 1)
     mask_bulan = (df["Tanggal"] >= month_start) & (df["Tanggal"] <= tanggal_acuan)
     sub_bulan = df[mask_bulan]
-    hari_berjalan_bulan = tanggal_acuan.day
+    data_last = min(tanggal_acuan, sub["Tanggal"].max())
+    first_day = df.groupby("Cabang")["Tanggal"].min().to_dict()
     if not sub_bulan.empty:
         g_bulan = sub_bulan.groupby("Cabang")["NomorPengiriman"].nunique().reset_index()
         g_bulan.columns = ["Cabang", "TotalWalkinBulanIni"]
@@ -1457,7 +1479,10 @@ def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date) -> pd
     else:
         g["TotalWalkinBulanIni"] = 0
     g["TotalWalkinBulanIni"] = g["TotalWalkinBulanIni"].fillna(0)
-    g["RataRataPerHari"] = g["TotalWalkinBulanIni"] / hari_berjalan_bulan if hari_berjalan_bulan else 0.0
+    g["RataRataPerHari"] = g.apply(
+        lambda r: _ceil_avg(r["TotalWalkinBulanIni"],
+                            max(0, (data_last - max(month_start, first_day.get(r["Cabang"], month_start))).days + 1)),
+        axis=1)
     g = g.drop(columns=["TotalWalkinBulanIni"])
     return g
 
@@ -1490,7 +1515,7 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
         if has_rata2:
             rata2_cell = (
                 f'<td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:#374151;">'
-                f'{format_decimal(r["RataRataPerHari"])}</td>'
+                f'{format_number(r["RataRataPerHari"])}</td>'
             )
         rows_html += f"""<tr>
         <td style="padding:8px 12px;border:1px solid #e5e7eb;">{r['Cabang']}</td>
@@ -1501,10 +1526,10 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
     # user tidak perlu scroll balik ke atas untuk lihat rata-rata keseluruhan.
     rata2_summary_cell = ""
     if has_rata2:
-        overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
+        overall_avg_per_hari = float(math.ceil(df_summary["RataRataPerHari"].mean()))
         rata2_summary_cell = (
             f'<td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;'
-            f'text-align:right;color:#0f766e;font-weight:800;">{format_decimal(overall_avg_per_hari)}</td>'
+            f'text-align:right;color:#0f766e;font-weight:800;">{format_number(overall_avg_per_hari)}</td>'
         )
     summary_row = f"""<tr style="background:#f0fdfa;">
     <td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;font-weight:800;color:#0f766e;">RATA-RATA SELURUH CABANG</td>
@@ -1555,10 +1580,10 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
         ax.text(0.5, 0.5, "Tidak ada data", ha="center", va="center")
     else:
         if has_rata2:
-            table_data = [[r["Cabang"], format_number(r["TotalWalkin"]), format_decimal(r["RataRataPerHari"])] for _, r in df_summary.iterrows()]
+            table_data = [[r["Cabang"], format_number(r["TotalWalkin"]), format_number(r["RataRataPerHari"])] for _, r in df_summary.iterrows()]
             col_labels = ["Cabang", "Total Walk-in", "Rata-rata / Hari"]
-            overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
-            table_data.append(["RATA-RATA", format_number(overall_avg), format_decimal(overall_avg_per_hari)])
+            overall_avg_per_hari = float(math.ceil(df_summary["RataRataPerHari"].mean()))
+            table_data.append(["RATA-RATA", format_number(overall_avg), format_number(overall_avg_per_hari)])
         else:
             table_data = [[r["Cabang"], format_number(r["TotalWalkin"])] for _, r in df_summary.iterrows()]
             col_labels = ["Cabang", "Total Walk-in"]
@@ -1667,11 +1692,11 @@ def generate_walkin_table_pdf(df_summary: pd.DataFrame, title: str = "Walk-in pe
         for _, r in df_summary.iterrows():
             row = [str(r["Cabang"]), format_number(r["TotalWalkin"])]
             if has_rata2:
-                row.append(format_decimal(r["RataRataPerHari"]))
+                row.append(format_number(r["RataRataPerHari"]))
             data.append(row)
-        overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean()) if has_rata2 else None
+        overall_avg_per_hari = float(math.ceil(df_summary["RataRataPerHari"].mean())) if has_rata2 else None
         summary_row = ["RATA-RATA SELURUH CABANG", format_number(overall_avg)] + (
-            [format_decimal(overall_avg_per_hari)] if has_rata2 else []
+            [format_number(overall_avg_per_hari)] if has_rata2 else []
         )
         data.append(summary_row)
 
@@ -3202,10 +3227,10 @@ with tab4:
         st.info("Belum ada data Walk-in untuk periode ini. Upload file Rincian Pengiriman Pesanan + Faktur Penjualan (walk-in) lewat sidebar.")
     else:
         overall_avg = _walkin_overall_avg(walkin_current)
-        overall_avg_per_hari = float(walkin_current["RataRataPerHari"].mean()) if "RataRataPerHari" in walkin_current.columns else 0.0
+        overall_avg_per_hari = float(math.ceil(walkin_current["RataRataPerHari"].mean())) if "RataRataPerHari" in walkin_current.columns else 0.0
         st.markdown(
             f"**Rata-rata Walk-in seluruh cabang:** {format_number(overall_avg)} "
-            f"&nbsp;|&nbsp; **Rata-rata per hari seluruh cabang ({BULAN_ID.get(tanggal_acuan.month, '')}):** {format_decimal(overall_avg_per_hari)}"
+            f"&nbsp;|&nbsp; **Rata-rata per hari seluruh cabang ({BULAN_ID.get(tanggal_acuan.month, '')}):** {format_number(overall_avg_per_hari)}"
         )
         st.caption(
             f"Total Walk-in = kumulatif kuartal berjalan ({quarter_period_label}). "
@@ -3246,22 +3271,22 @@ with tab4:
             st.dataframe(tbl, use_container_width=True, hide_index=True)
 
             st.markdown("###### 📈 Rata-rata Walk-in per Hari per Bulan")
-            st.caption("Rata-rata = jumlah walk-in bulan tsb dibagi hari yang sudah berjalan di bulan itu "
-                       "(bulan berjalan dihitung s/d Tanggal Acuan, bulan yang sudah lewat dihitung penuh sebulan).")
+            st.caption("Rata-rata = jumlah walk-in bulan tsb dibagi hari aktif, dibulatkan ke atas. Bulan berjalan dihitung "
+                       "s/d tanggal data terakhir; cabang baru dihitung sejak data pertamanya.")
             tbl_avg = wk_month.pivot_table(index="Cabang", columns="Bulan", values="RataRataPerHari", aggfunc="sum", fill_value=0)
             tbl_avg = tbl_avg.reindex(columns=bulan_list)
             tbl_avg.columns = [BULAN_ID.get(int(b), str(b)) for b in tbl_avg.columns]
-            tbl_avg = tbl_avg.round(1)
+            tbl_avg = tbl_avg.astype(int)
             tbl_avg = tbl_avg.reset_index()
             tbl_avg = _walkin_ordered(tbl_avg)
-            rata2_row = tbl_avg.drop(columns=["Cabang"]).mean().round(1)
+            rata2_row = tbl_avg.drop(columns=["Cabang"]).mean().apply(lambda v: int(math.ceil(v)))
             tbl_avg = pd.concat([tbl_avg, pd.DataFrame([{"Cabang": "RATA-RATA", **rata2_row.to_dict()}])], ignore_index=True)
             st.dataframe(tbl_avg, use_container_width=True, hide_index=True)
 
             with st.expander("Rincian: Pesanan (DO) vs Beli Langsung per bulan"):
                 det = wk_month.copy()
                 det["Bulan"] = det["Bulan"].apply(lambda b: BULAN_ID.get(int(b), str(b)))
-                det["RataRataPerHari"] = det["RataRataPerHari"].round(1)
+                det["RataRataPerHari"] = det["RataRataPerHari"].astype(int)
                 det = _walkin_ordered(det)[["Cabang", "Bulan", "Pesanan (DO)", "Beli Langsung", "Total", "Hari", "RataRataPerHari"]]
                 st.dataframe(det.rename(columns={"RataRataPerHari": "Rata-rata / Hari"}), use_container_width=True, hide_index=True)
 

@@ -39,7 +39,7 @@ fB=Font(name=AR,size=10); fBb=Font(name=AR,size=10,bold=True); fIn=Font(name=AR,
 pH=PatternFill('solid',fgColor='0F766E'); pT=PatternFill('solid',fgColor='134E4A'); pSum=PatternFill('solid',fgColor='E6F4F1'); pIn=PatternFill('solid',fgColor='FFF2CC')
 C=Alignment(horizontal='center',vertical='center',wrap_text=True); Lw=Alignment(horizontal='left',vertical='top',wrap_text=True)
 thin=Side(style='thin',color='D1D5DB'); BR=Border(left=thin,right=thin,top=thin,bottom=thin)
-N0='#,##0;-#,##0;"-"'; N1='0.0;-0.0;"-"'
+N0='#,##0;-#,##0;"-"'; N1='#,##0;-#,##0;0'  # rata-rata: bilangan bulat (dibulatkan ke atas)
 
 wb=Workbook()
 # ---------- Info ----------
@@ -84,7 +84,7 @@ for (title,st),sc in zip(sections,S):
         wd.cell(2,ci,f'=IFERROR(_xlfn.MINIFS({drng},{rng},">0"),"")' if cb!='TOTAL' else f'=MIN({L(sc["cab"][cabs[0]])}2:{L(sc["cab"][cabs[-1]])}2)').number_format='dd mmm yy'
         wd.cell(3,ci,f'=SUM({rng})').number_format=N0
         wd.cell(4,ci,f'=IF({col}2="",0,MAX(0,{LAST}-{col}2+1))').number_format=N0
-        wd.cell(5,ci,f'=IF({col}4=0,0,{col}3/{col}4)').number_format=N1
+        wd.cell(5,ci,f'=IF({col}4=0,0,ROUNDUP({col}3/{col}4,0))').number_format=N1
         if st==3:
             wd.cell(6,ci,f'={TGT}' if cb!='TOTAL' else f'={TGT}*{n}').number_format=N1
             wd.cell(7,ci,f'={col}5-{col}6').number_format=N1
@@ -138,13 +138,13 @@ for i,cb in enumerate(cabs):
         wr.cell(r,3+k,f'=SUMPRODUCT(({dr}>=DATE({y},{m},1))*({dr}<=EOMONTH(DATE({y},{m},1),0))*N(+{vr}))').number_format=N0
     wr.cell(r,6,f'=SUM(C{r}:E{r})').number_format=N0
     for k,m in enumerate(months):
-        col=L(3+k); wr.cell(r,7+k,f'=IF({days_in(m,r)}=0,0,{col}{r}/{days_in(m,r)})').number_format=N1
-    wr.cell(r,10,f'=IF(R{r}=0,0,F{r}/R{r})').number_format=N1
+        col=L(3+k); wr.cell(r,7+k,f'=IF({days_in(m,r)}=0,0,ROUNDUP({col}{r}/{days_in(m,r)},0))').number_format=N1
+    wr.cell(r,10,f'=IF(R{r}=0,0,ROUNDUP(F{r}/R{r},0))').number_format=N1
     wr.cell(r,17,f"='Detail Walk-in'!{vcol}2").number_format='dd mmm yy'
     wr.cell(r,18,f"='Detail Walk-in'!{vcol}4").number_format=N0
     wr.cell(r,11,f'={TGT}').number_format=N1
     wr.cell(r,12,f'=J{r}-K{r}').number_format=N1
-    wr.cell(r,13,f'=IF(L{r}<0,ROUNDUP(-L{r}*30,0),0)').number_format=N0
+    wr.cell(r,13,f'=IF(L{r}<0,-L{r}*30,0)').number_format=N0
     wr.cell(r,14,f'=IF(J{r}<K{r},"DI BAWAH TARGET","ON TARGET")')
     wr.cell(r,15,round(stats[cb]['lgs'],4)).number_format='0.0%'
     wr.cell(r,16,round(stats[cb]['cancel'],4)).number_format='0.0%'
@@ -162,7 +162,7 @@ for j in range(2,19):
 wr.conditional_formatting.add(f'N5:N{rT-1}',CellIsRule(operator='equal',formula=['"DI BAWAH TARGET"'],font=Font(name=AR,bold=True,color='DC2626'),fill=PatternFill('solid',fgColor='FEE2E2')))
 wr.conditional_formatting.add(f'N5:N{rT-1}',CellIsRule(operator='equal',formula=['"ON TARGET"'],font=Font(name=AR,bold=True,color='16A34A'),fill=PatternFill('solid',fgColor='DCFCE7')))
 wr.conditional_formatting.add(f'L5:L{rT-1}',CellIsRule(operator='lessThan',formula=['0'],font=Font(name=AR,bold=True,color='DC2626')))
-wr.cell(rT+2,2,'Rata-rata dihitung per HARI AKTIF (sejak tanggal data pertama cabang, supaya cabang baru tidak terlihat rendah karena hari sebelum buka). Tambahan walk-in / bulan = kekurangan rata-rata per hari × 30 hari. % beli langsung & % cancel dari data export (biru).').font=fNote
+wr.cell(rT+2,2,'Rata-rata dibulatkan ke atas (tanpa koma) dan dihitung per HARI AKTIF (sejak tanggal data pertama cabang, supaya cabang baru tidak terlihat rendah karena hari sebelum buka). Tambahan walk-in / bulan = kekurangan rata-rata per hari × 30 hari. % beli langsung & % cancel dari data export (biru).').font=fNote
 wr.column_dimensions['A'].width=2; wr.column_dimensions['B'].width=18
 for j in range(3,19): wr.column_dimensions[L(j)].width=13
 wr.column_dimensions['N'].width=18; wr.freeze_panes='C5'
@@ -177,8 +177,8 @@ def mavg(sub,m):
     return (sub[(sub.tgl>=s)&(sub.tgl<=e)].shape[0]/dn) if dn>0 else 0
 rows=[]
 for cb in cabs:
-    sub=df[df.cab==cb]; avg=len(sub)/max((last-max(sub.tgl.min(),qs)).days+1,1)
-    cur=mavg(sub,cur_m); prev=mavg(sub,prev_m) if prev_m!=cur_m else cur
+    sub=df[df.cab==cb]; avg=math.ceil(round(len(sub)/max((last-max(sub.tgl.min(),qs)).days+1,1),9))
+    cur=math.ceil(round(mavg(sub,cur_m),9)); prev=math.ceil(round(mavg(sub,prev_m),9)) if prev_m!=cur_m else cur
     rows.append((cb,avg,cur,prev,sub))
 below=[r for r in rows if r[1]<TARGET]; watch=[r for r in rows if r[1]>=TARGET and r[2]<TARGET]
 ws['B1']=f'STRATEGI MENINGKATKAN WALK-IN — CABANG DI BAWAH {TARGET:g} / HARI'; ws['B1'].font=fT
@@ -207,7 +207,7 @@ def build(cb,avg,cur,prev,sub,flag_watch=False):
     start=sub.tgl.min()
     f=[];m=[];on=[];off=[]
     trend=cur-prev
-    f.append(f'Hari tersepi {HARI[weak]} ({dow[weak]:.1f}/hari), teramai {HARI[strong]} ({dow[strong]:.1f}/hari).')
+    f.append(f'Hari tersepi {HARI[weak]} ({math.ceil(dow[weak])}/hari), teramai {HARI[strong]} ({math.ceil(dow[strong])}/hari).')
     f.append(f'Beli langsung {pct(lg)} dari walk-in; cancel {pct(canc)} dari DO; service laptop {pct(lap)}.')
     if len(top) and kec_ok>0.5: f.append('Area utama konsumen: '+', '.join(f'{k.title()} {v*100:.0f}%' for k,v in top.items())+'.')
     else: f.append(f'Kolom KECAMATAN hanya terisi rapi {pct(kec_ok)} DO — area asal konsumen belum bisa dibaca.')
@@ -218,12 +218,12 @@ def build(cb,avg,cur,prev,sub,flag_watch=False):
              'Iklan Meta/Google radius 3–5 km dari cabang dengan pesan "cek kerusakan gratis" + tombol WhatsApp.']
         off+=['Program pembukaan/re-launch: promo cek gratis & diskon jasa minggu pertama, spanduk & brosur di perumahan, sekolah/kampus, dan pasar sekitar.',
               'Kerja sama komunitas/RT-RW dan kantor sekitar (titip brosur, kupon diskon karyawan).']
-    if trend<=-1.5:
-        m.append(f'Turun {abs(trend):.1f} walk-in/hari di {BULAN[cur_m].title()} dibanding {BULAN[prev_m].title()}.')
+    if trend<=-2:
+        m.append(f'Turun {abs(trend):.0f} walk-in/hari di {BULAN[cur_m].title()} dibanding {BULAN[prev_m].title()}.')
         off.append('Cek penyebab penurunan bulan ini: jam buka, jumlah teknisi/admin, stok sparepart populer, kompetitor baru di sekitar.')
         on.append('Pastikan iklan & posting media sosial cabang tetap jalan tiap minggu (cek apakah ada iklan yang berhenti bulan ini).')
-    elif trend>=1.0:
-        m.append(f'Sudah naik {trend:.1f}/hari di {BULAN[cur_m].title()} — pertahankan aktivitas yang sedang jalan.')
+    elif trend>=1:
+        m.append(f'Sudah naik {trend:.0f}/hari di {BULAN[cur_m].title()} — pertahankan aktivitas yang sedang jalan.')
     if canc>=0.15:
         m.append(f'Cancel tinggi ({pct(canc)} DO) — banyak konsumen datang tapi batal.')
         off.append('Follow-up WA H+1 untuk semua DO cancel (tawarkan opsi sparepart lebih murah / cicilan / garansi); catat alasan cancel.')
@@ -242,19 +242,19 @@ def build(cb,avg,cur,prev,sub,flag_watch=False):
     off.append('Program referral: konsumen yang bawa teman dapat voucher aksesoris / diskon jasa berikutnya.')
     if flag_watch: m.insert(0,f'Rata-rata kuartal sudah ≥ {TARGET:g}, tapi {BULAN[cur_m].title()} turun di bawah target.')
     gap=max(TARGET-avg,0) if not flag_watch else max(TARGET-cur,0)
-    step=min(gap, max(1.5, round(gap*0.3,1)))
-    tgt=f'Naik ke ±{min(TARGET,(cur if not flag_watch else cur)+step):.0f} walk-in/hari dalam 30 hari (+{step:.1f}/hari), lalu evaluasi mingguan.'
+    step=min(gap, max(2, math.ceil(gap*0.3)))
+    tgt=f'Naik ke {min(TARGET,cur+step):.0f} walk-in/hari dalam 30 hari (+{step:.0f}/hari), lalu evaluasi mingguan.'
     return avg,cur,trend,gap,f,m,on,off,tgt
 r=5
 allrows=[(x,False) for x in sorted(below,key=lambda t:t[1])]+[(x,True) for x in watch]
 for (cb,avg,cur,prev,sub),w in allrows:
     avg,cur,trend,gap,f,m,on,off,tgt=build(cb,avg,cur,prev,sub,w)
-    vals=[cb+(' (WASPADA)' if w else ''),avg,cur,trend,gap,math.ceil(gap*30),'\n'.join('• '+x for x in f),'\n'.join('• '+x for x in m) or '• Selisih ke target relatif kecil.','\n'.join('• '+x for x in on),'\n'.join('• '+x for x in off),tgt]
+    vals=[cb+(' (WASPADA)' if w else ''),avg,cur,trend,gap,gap*30,'\n'.join('• '+x for x in f),'\n'.join('• '+x for x in m) or '• Selisih ke target relatif kecil.','\n'.join('• '+x for x in on),'\n'.join('• '+x for x in off),tgt]
     for j,v in enumerate(vals,2):
         c=ws.cell(r,j,v); c.border=BR; c.font=fBb if j==2 else fB
         c.alignment=Lw if j>=8 else C
         if j in (3,4,6): c.number_format=N1
-        if j==5: c.number_format='+0.0;-0.0;0.0'
+        if j==5: c.number_format='+0;-0;0'
         if j==7: c.number_format=N0
     ws.row_dimensions[r].height=max(150, 16*max(len(on),len(off),len(f))*2.2)
     r+=1
