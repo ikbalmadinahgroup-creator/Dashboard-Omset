@@ -1462,6 +1462,45 @@ def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date) -> pd
     return g
 
 
+def _week_of_month(d: date) -> int:
+    """Minggu ke-berapa dalam bulan (Minggu 1 = tanggal 1-7, dst)."""
+    return (d.day - 1) // 7 + 1
+
+
+def _hari_in_week(minggu: int, tanggal_acuan: date) -> int:
+    """Jumlah hari yang sudah berjalan di minggu tsb (dalam bulan tanggal_acuan).
+    Minggu yang sudah lewat penuh dihitung 7 hari (atau sisa hari di akhir
+    bulan kalau minggu terakhir tidak genap 7 hari), minggu berjalan (yang
+    memuat tanggal_acuan) dihitung parsial s/d tanggal_acuan."""
+    last_day = calendar.monthrange(tanggal_acuan.year, tanggal_acuan.month)[1]
+    week_start_day = (minggu - 1) * 7 + 1
+    week_end_day = min(minggu * 7, last_day)
+    if tanggal_acuan.day < week_start_day:
+        return 0
+    elif tanggal_acuan.day >= week_end_day:
+        return week_end_day - week_start_day + 1
+    else:
+        return tanggal_acuan.day - week_start_day + 1
+
+
+def aggregate_walkin_weekly_current_month(df: pd.DataFrame, tanggal_acuan: date) -> pd.DataFrame:
+    """Progress mingguan walk-in HANYA di bulan berjalan (Minggu 1 s/d minggu
+    tanggal_acuan). Dipakai supaya user bisa lihat tren per minggu di bulan
+    yang sedang berjalan, tanpa perlu tunggu sebulan penuh."""
+    if df.empty:
+        return pd.DataFrame(columns=["Cabang", "Minggu", "Total", "Hari", "RataRataPerHari"])
+    month_start = date(tanggal_acuan.year, tanggal_acuan.month, 1)
+    sub = df[(df["Tanggal"] >= month_start) & (df["Tanggal"] <= tanggal_acuan)].copy()
+    if sub.empty:
+        return pd.DataFrame(columns=["Cabang", "Minggu", "Total", "Hari", "RataRataPerHari"])
+    sub["Minggu"] = sub["Tanggal"].apply(_week_of_month)
+    g = sub.groupby(["Cabang", "Minggu"])["NomorPengiriman"].nunique().reset_index()
+    g.columns = ["Cabang", "Minggu", "Total"]
+    g["Hari"] = g["Minggu"].apply(lambda m: _hari_in_week(int(m), tanggal_acuan))
+    g["RataRataPerHari"] = g.apply(lambda r: (r["Total"] / r["Hari"]) if r["Hari"] else 0.0, axis=1)
+    return g
+
+
 def _walkin_ordered(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -1482,6 +1521,7 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
     if df_summary.empty:
         return "<p style='color:#6b7280;'>Belum ada data Walk-in.</p>"
     has_rata2 = "RataRataPerHari" in df_summary.columns
+    has_ach = "Pencapaian" in df_summary.columns and "Kategori" in df_summary.columns
     rows_html = ""
     for _, r in df_summary.iterrows():
         total = r["TotalWalkin"]
@@ -1492,10 +1532,21 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
                 f'<td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:#374151;">'
                 f'{format_decimal(r["RataRataPerHari"])}</td>'
             )
+        ach_cell = ""
+        if has_ach:
+            kat = r["Kategori"]
+            kat_color = _WALKIN_KATEGORI_COLOR.get(kat, "#6b7280")
+            ach_cell = (
+                f'<td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:{kat_color};font-weight:800;">'
+                f'{format_decimal(r["Pencapaian"])}%</td>'
+                f'<td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:center;">'
+                f'<span style="background:{kat_color};color:white;padding:2px 12px;border-radius:12px;font-size:0.82em;font-weight:700;">{kat.upper()}</span></td>'
+            )
         rows_html += f"""<tr>
         <td style="padding:8px 12px;border:1px solid #e5e7eb;">{r['Cabang']}</td>
         <td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:{color};font-weight:700;">{format_number(total)}</td>
         {rata2_cell}
+        {ach_cell}
         </tr>"""
     # Baris ringkasan RATA-RATA seluruh cabang di paling bawah tabel, supaya
     # user tidak perlu scroll balik ke atas untuk lihat rata-rata keseluruhan.
@@ -1506,30 +1557,46 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
             f'<td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;'
             f'text-align:right;color:#0f766e;font-weight:800;">{format_decimal(overall_avg_per_hari)}</td>'
         )
+    ach_summary_cell = ""
+    if has_ach:
+        avg_pencapaian = float(df_summary["Pencapaian"].mean())
+        ach_summary_cell = (
+            f'<td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;'
+            f'text-align:right;color:#0f766e;font-weight:800;">{format_decimal(avg_pencapaian)}%</td>'
+            f'<td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;"></td>'
+        )
     summary_row = f"""<tr style="background:#f0fdfa;">
     <td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;font-weight:800;color:#0f766e;">RATA-RATA SELURUH CABANG</td>
     <td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;text-align:right;color:#0f766e;font-weight:800;">{format_number(overall_avg)}</td>
     {rata2_summary_cell}
+    {ach_summary_cell}
     </tr>"""
     rata2_header = '<th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;">Rata-rata / Hari</th>' if has_rata2 else ""
+    ach_header = (
+        '<th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;">% Pencapaian (Target 25/Hari)</th>'
+        '<th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:center;">Status</th>'
+    ) if has_ach else ""
     return f"""<table style="width:100%;border-collapse:collapse;">
     <thead><tr style="background:#f3f4f6;">
     <th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:left;">Cabang</th>
     <th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;">Total Walk-in</th>
     {rata2_header}
+    {ach_header}
     </tr></thead><tbody>{rows_html}{summary_row}</tbody></table>"""
 
 
 def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in per Cabang",
                                  periode_label: str = "") -> bytes:
     has_rata2 = "RataRataPerHari" in df_summary.columns
+    has_ach = "Pencapaian" in df_summary.columns and "Kategori" in df_summary.columns
     overall_avg = _walkin_overall_avg(df_summary)
 
     n_table_rows = max(1, len(df_summary) + 2)  # + header row + baris ringkasan
     header_h = 1.5
     row_h = 0.42
     fig_h = header_h + max(2, row_h * n_table_rows + 0.6)
-    fig = plt.figure(figsize=(6.5, fig_h))
+    fig_w = 8.8 if has_ach else 6.5
+    fig = plt.figure(figsize=(fig_w, fig_h))
     gs = fig.add_gridspec(2, 1, height_ratios=[header_h, fig_h - header_h], hspace=0.03)
 
     # --- Header banner: logo MFlash + judul + periode ---
@@ -1556,21 +1623,30 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
     else:
         if has_rata2:
             table_data = [[r["Cabang"], format_number(r["TotalWalkin"]), format_decimal(r["RataRataPerHari"])] for _, r in df_summary.iterrows()]
-            col_labels = ["Cabang", "Total Walk-in", "Rata-rata / Hari"]
+            col_labels = ["Cabang", "Total\nWalk-in", "Rata-rata\n/ Hari"]
             overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
-            table_data.append(["RATA-RATA", format_number(overall_avg), format_decimal(overall_avg_per_hari)])
+            summary_row_vals = ["RATA-RATA", format_number(overall_avg), format_decimal(overall_avg_per_hari)]
         else:
             table_data = [[r["Cabang"], format_number(r["TotalWalkin"])] for _, r in df_summary.iterrows()]
-            col_labels = ["Cabang", "Total Walk-in"]
-            table_data.append(["RATA-RATA", format_number(overall_avg)])
+            col_labels = ["Cabang", "Total\nWalk-in"]
+            summary_row_vals = ["RATA-RATA", format_number(overall_avg)]
+        ach_col_idx = None
+        if has_ach:
+            ach_col_idx = len(col_labels)
+            col_labels = col_labels + ["%\nPencapaian", "Status"]
+            for i, (_, r) in enumerate(df_summary.iterrows()):
+                table_data[i] += [f"{format_decimal(r['Pencapaian'])}%", str(r["Kategori"]).upper()]
+            avg_pencapaian = float(df_summary["Pencapaian"].mean())
+            summary_row_vals += [f"{format_decimal(avg_pencapaian)}%", ""]
+        table_data.append(summary_row_vals)
         n_cols = len(col_labels)
-        first_w = 0.45
+        first_w = 0.24 if has_ach else 0.45
         rest_w = (1 - first_w) / (n_cols - 1)
         col_widths = [first_w] + [rest_w] * (n_cols - 1)
         tbl = ax.table(cellText=table_data, colLabels=col_labels, colWidths=col_widths,
                        bbox=[0, 0, 1, 1], cellLoc="center")
         tbl.auto_set_font_size(False)
-        tbl.set_fontsize(9)
+        tbl.set_fontsize(9 if not has_ach else 8.5)
         n_rows = len(table_data)
         for j in range(n_cols):
             tbl[0, j].set_text_props(ha="center")
@@ -1583,6 +1659,7 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
             cell.get_text().set_color("white")
             cell.get_text().set_fontweight("bold")
         # Body rows: zebra striping + warna hijau/merah utk Total Walk-in vs rata-rata.
+        _kat_color_map = {"Merah": "#dc2626", "Kuning": "#d97706", "Hijau": "#16a34a"}
         for i, (_, r) in enumerate(df_summary.iterrows(), start=1):
             row_bg = "#f8fafc" if i % 2 == 0 else "white"
             for j in range(n_cols):
@@ -1590,6 +1667,12 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
             total_color = "#16a34a" if r["TotalWalkin"] >= overall_avg else "#dc2626"
             tbl[i, 1].get_text().set_color(total_color)
             tbl[i, 1].get_text().set_fontweight("bold")
+            if has_ach and ach_col_idx is not None:
+                kat_color = _kat_color_map.get(r["Kategori"], "#374151")
+                tbl[i, ach_col_idx].get_text().set_color(kat_color)
+                tbl[i, ach_col_idx].get_text().set_fontweight("bold")
+                tbl[i, ach_col_idx + 1].get_text().set_color(kat_color)
+                tbl[i, ach_col_idx + 1].get_text().set_fontweight("bold")
         # Baris ringkasan RATA-RATA paling bawah: highlight teal muda.
         for j in range(n_cols):
             cell = tbl[n_rows, j]
@@ -1616,16 +1699,19 @@ def generate_walkin_table_pdf(df_summary: pd.DataFrame, title: str = "Walk-in pe
     from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 
     has_rata2 = "RataRataPerHari" in df_summary.columns
+    has_ach = "Pencapaian" in df_summary.columns and "Kategori" in df_summary.columns
     overall_avg = _walkin_overall_avg(df_summary)
 
     TEAL = rl_colors.HexColor("#0f766e")
     TEAL_LIGHT = rl_colors.HexColor("#f0fdfa")
     GREEN = rl_colors.HexColor("#16a34a")
+    YELLOW = rl_colors.HexColor("#d97706")
     RED = rl_colors.HexColor("#dc2626")
     GRAY_ROW = rl_colors.HexColor("#f8fafc")
     GRID = rl_colors.HexColor("#e5e7eb")
     TEXT_DARK = rl_colors.HexColor("#111827")
     GRAY_TEXT = rl_colors.HexColor("#6b7280")
+    _kat_color_map_pdf = {"Merah": RED, "Kuning": YELLOW, "Hijau": GREEN}
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=15 * mm,
@@ -1662,21 +1748,28 @@ def generate_walkin_table_pdf(df_summary: pd.DataFrame, title: str = "Walk-in pe
     if df_summary.empty:
         elements.append(Paragraph("Belum ada data Walk-in.", styles["Normal"]))
     else:
-        header = ["Cabang", "Total Walk-in"] + (["Rata-rata / Hari"] if has_rata2 else [])
+        header = ["Cabang", "Total Walk-in"] + (["Rata-rata / Hari"] if has_rata2 else []) + \
+            (["% Pencapaian", "Status"] if has_ach else [])
         data = [header]
         for _, r in df_summary.iterrows():
             row = [str(r["Cabang"]), format_number(r["TotalWalkin"])]
             if has_rata2:
                 row.append(format_decimal(r["RataRataPerHari"]))
+            if has_ach:
+                row += [f"{format_decimal(r['Pencapaian'])}%", str(r["Kategori"]).upper()]
             data.append(row)
         overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean()) if has_rata2 else None
         summary_row = ["RATA-RATA SELURUH CABANG", format_number(overall_avg)] + (
             [format_decimal(overall_avg_per_hari)] if has_rata2 else []
         )
+        if has_ach:
+            avg_pencapaian_pdf = float(df_summary["Pencapaian"].mean())
+            summary_row += [f"{format_decimal(avg_pencapaian_pdf)}%", ""]
         data.append(summary_row)
 
         n_cols = len(header)
-        col_widths = [70 * mm] + [ (170 - 70) * mm / (n_cols - 1) ] * (n_cols - 1)
+        first_col_w = 55 * mm if has_ach else 70 * mm
+        col_widths = [first_col_w] + [ (170 - first_col_w / mm) * mm / (n_cols - 1) ] * (n_cols - 1)
         tbl = Table(data, colWidths=col_widths, repeatRows=1)
 
         style_cmds = [
@@ -1697,6 +1790,7 @@ def generate_walkin_table_pdf(df_summary: pd.DataFrame, title: str = "Walk-in pe
             ("LINEABOVE", (0, -1), (-1, -1), 1.4, TEAL),
         ]
         n_data_rows = len(data) - 2  # tanpa header & baris ringkasan
+        ach_col_idx_pdf = 3 if has_rata2 else 2
         for i in range(1, n_data_rows + 1):
             if i % 2 == 0:
                 style_cmds.append(("BACKGROUND", (0, i), (-1, i), GRAY_ROW))
@@ -1704,6 +1798,11 @@ def generate_walkin_table_pdf(df_summary: pd.DataFrame, title: str = "Walk-in pe
             color = GREEN if total_val >= overall_avg else RED
             style_cmds.append(("TEXTCOLOR", (1, i), (1, i), color))
             style_cmds.append(("FONTNAME", (1, i), (1, i), "Helvetica-Bold"))
+            if has_ach:
+                kat = df_summary.iloc[i - 1]["Kategori"]
+                kat_color = _kat_color_map_pdf.get(kat, TEXT_DARK)
+                style_cmds.append(("TEXTCOLOR", (ach_col_idx_pdf, i), (ach_col_idx_pdf + 1, i), kat_color))
+                style_cmds.append(("FONTNAME", (ach_col_idx_pdf, i), (ach_col_idx_pdf + 1, i), "Helvetica-Bold"))
         last = len(data) - 1
         style_cmds += [
             ("BACKGROUND", (0, last), (-1, last), TEAL_LIGHT),
@@ -3625,14 +3724,40 @@ with tab4:
             f"Rata-rata / Hari = rata-rata walk-in bulan {BULAN_ID.get(tanggal_acuan.month, '')} "
             f"s/d tanggal {tanggal_acuan.day} saja (bukan rata-rata sekuartal), supaya mencerminkan tren bulan berjalan."
         )
-        st.markdown(render_walkin_table_html(walkin_current, overall_avg), unsafe_allow_html=True)
+        # --- Hitung pencapaian target (25/hari) lebih dulu supaya bisa
+        # ditempel langsung ke tabel utama & export JPG/PDF utama, jadi
+        # langsung kelihatan tanpa perlu scroll ke bagian terpisah.
+        WALKIN_TARGET_PER_HARI = 25.0
+        try:
+            walkin_achievement = compute_walkin_achievement(walkin_current, WALKIN_TARGET_PER_HARI)
+        except Exception as e:
+            walkin_achievement = pd.DataFrame(columns=["Cabang", "RataRataPerHari", "Target", "Pencapaian", "Kategori"])
+            st.error(f"Gagal menghitung pencapaian target: {e}")
+
+        if not walkin_achievement.empty:
+            walkin_current_disp = walkin_current.merge(
+                walkin_achievement[["Cabang", "Pencapaian", "Kategori"]], on="Cabang", how="left"
+            )
+        else:
+            walkin_current_disp = walkin_current
+
+        st.markdown(render_walkin_table_html(walkin_current_disp, overall_avg), unsafe_allow_html=True)
+        if not walkin_achievement.empty:
+            n_merah = int((walkin_achievement["Kategori"] == "Merah").sum())
+            n_kuning = int((walkin_achievement["Kategori"] == "Kuning").sum())
+            n_hijau = int((walkin_achievement["Kategori"] == "Hijau").sum())
+            st.caption(
+                f"🎯 Target: {format_decimal(WALKIN_TARGET_PER_HARI)} walk-in/hari per cabang (bulan {BULAN_ID.get(tanggal_acuan.month, '')}). "
+                f"🔴 Merah &lt; 85% ({n_merah} cabang) &nbsp;|&nbsp; 🟡 Kuning 85% - 99,99% ({n_kuning} cabang) &nbsp;|&nbsp; "
+                f"🟢 Hijau ≥ 100% ({n_hijau} cabang)."
+            )
 
         exp_col1, exp_col2 = st.columns(2)
         with exp_col1:
-            st.download_button("🖼️ Export JPG", data=generate_walkin_table_image(walkin_current, periode_label=quarter_period_label_full),
+            st.download_button("🖼️ Export JPG", data=generate_walkin_table_image(walkin_current_disp, periode_label=quarter_period_label_full),
                                 file_name="walkin_per_cabang.jpg", mime="image/jpeg")
         with exp_col2:
-            st.download_button("📄 Export PDF", data=generate_walkin_table_pdf(walkin_current, periode_label=quarter_period_label_full),
+            st.download_button("📄 Export PDF", data=generate_walkin_table_pdf(walkin_current_disp, periode_label=quarter_period_label_full),
                                 file_name="walkin_per_cabang.pdf", mime="application/pdf")
 
         st.markdown("<br/>", unsafe_allow_html=True)
@@ -3642,25 +3767,55 @@ with tab4:
         fig_walkin.update_layout(height=340, margin=dict(t=20, b=10, l=10, r=10), xaxis_title="Cabang", yaxis_title="Total Walk-in")
         st.plotly_chart(fig_walkin, use_container_width=True, key="chart_walkin_branch")
 
-        # --- Pencapaian Target Walk-in (25/hari per cabang, warna merah/kuning/hijau) ---
+        # --- Progress Mingguan Bulan Berjalan (Minggu 1 s/d minggu tanggal_acuan) ---
         st.markdown("<br/>", unsafe_allow_html=True)
-        st.markdown(f"###### 🎯 Pencapaian Target Walk-in (Target: 25/hari per cabang, bulan {BULAN_ID.get(tanggal_acuan.month, '')})")
-        st.caption("Dihitung dari rata-rata walk-in bulan berjalan per cabang. 🔴 < 85% &nbsp; 🟡 85% - 99,99% &nbsp; 🟢 ≥ 100%.")
-        WALKIN_TARGET_PER_HARI = 25.0
-        walkin_achievement = compute_walkin_achievement(walkin_current, WALKIN_TARGET_PER_HARI)
-        if not walkin_achievement.empty:
-            n_merah = int((walkin_achievement["Kategori"] == "Merah").sum())
-            n_kuning = int((walkin_achievement["Kategori"] == "Kuning").sum())
-            n_hijau = int((walkin_achievement["Kategori"] == "Hijau").sum())
-            kpi_ach1, kpi_ach2, kpi_ach3 = st.columns(3)
-            kpi_ach1.metric("🔴 Merah (< 85%)", n_merah)
-            kpi_ach2.metric("🟡 Kuning (85% - 99,99%)", n_kuning)
-            kpi_ach3.metric("🟢 Hijau (≥ 100%)", n_hijau)
-            st.markdown(render_walkin_achievement_html(walkin_achievement, WALKIN_TARGET_PER_HARI), unsafe_allow_html=True)
-        else:
-            st.info("Belum ada data untuk menghitung pencapaian target.")
+        st.markdown(f"###### 📆 Progress Mingguan Walk-in — Bulan {BULAN_ID.get(tanggal_acuan.month, '')} Berjalan")
+        st.caption(
+            f"Progress per minggu HANYA di bulan {BULAN_ID.get(tanggal_acuan.month, '')} (Minggu 1 = tanggal 1-7, dst), "
+            f"dari Minggu 1 s/d minggu yang memuat tanggal acuan ({tanggal_acuan.day} {BULAN_ID.get(tanggal_acuan.month, '')})."
+        )
+        try:
+            df_walkin_selected = df_walkin[df_walkin["Cabang"].isin(selected_branches)]
+            wk_weekly = aggregate_walkin_weekly_current_month(df_walkin_selected, tanggal_acuan)
+        except Exception as e:
+            wk_weekly = pd.DataFrame()
+            st.error(f"Gagal menghitung progress mingguan: {e}")
 
-        wk_month = aggregate_walkin_monthly_split(df_walkin[df_walkin["Cabang"].isin(selected_branches)], tanggal_acuan)
+        if wk_weekly.empty:
+            st.info("Belum ada data walk-in di bulan berjalan untuk progress mingguan.")
+        else:
+            minggu_list = sorted(wk_weekly["Minggu"].unique())
+            minggu_labels = [f"Minggu {m}" for m in minggu_list]
+            tbl_wk = wk_weekly.pivot_table(index="Cabang", columns="Minggu", values="Total", aggfunc="sum", fill_value=0)
+            tbl_wk = tbl_wk.reindex(columns=minggu_list)
+            tbl_wk.columns = minggu_labels
+            tbl_wk = tbl_wk.reset_index()
+            tbl_wk = _walkin_ordered(tbl_wk)
+            tot_wk = tbl_wk.drop(columns=["Cabang"]).sum()
+            tbl_wk = pd.concat([tbl_wk, pd.DataFrame([{"Cabang": "TOTAL", **tot_wk.to_dict()}])], ignore_index=True)
+            st.dataframe(tbl_wk, use_container_width=True, hide_index=True)
+
+            wk_ordered_cabang = sorted(wk_weekly["Cabang"].unique(), key=lambda b: _BRANCH_RANK.get(str(b).upper(), 999))
+            fig_weekly = go.Figure()
+            _weekly_palette = ["#0f766e", "#dc2626", "#d97706", "#2563eb", "#7c3aed", "#db2777", "#059669",
+                                "#ea580c", "#4f46e5", "#16a34a", "#0891b2", "#be123c", "#65a30d", "#9333ea",
+                                "#c026d3", "#0d9488", "#b45309", "#475569"]
+            for i, cabang in enumerate(wk_ordered_cabang):
+                sub = wk_weekly[wk_weekly["Cabang"] == cabang].set_index("Minggu").reindex(minggu_list)
+                fig_weekly.add_trace(go.Scatter(
+                    x=minggu_labels, y=sub["Total"], mode="lines+markers", name=str(cabang),
+                    line=dict(color=_weekly_palette[i % len(_weekly_palette)], width=2), marker=dict(size=6),
+                ))
+            fig_weekly.update_layout(height=420, margin=dict(t=20, b=10, l=10, r=10),
+                                      xaxis_title="Minggu", yaxis_title="Total Walk-in",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+            st.plotly_chart(fig_weekly, use_container_width=True, key="chart_walkin_weekly")
+
+        try:
+            wk_month = aggregate_walkin_monthly_split(df_walkin[df_walkin["Cabang"].isin(selected_branches)], tanggal_acuan)
+        except Exception as e:
+            wk_month = pd.DataFrame()
+            st.error(f"Gagal memuat data bulanan: {e}")
         if not wk_month.empty:
             st.markdown("###### 📅 Walk-in per Bulan")
             st.caption("1 nomor pengiriman pesanan (DO) = 1 walk-in (termasuk cancel). Faktur tanpa DO = 1 walk-in (beli langsung). "
@@ -3690,50 +3845,62 @@ with tab4:
             st.dataframe(tbl_avg, use_container_width=True, hide_index=True)
 
             # --- Grafik tren kenaikan/penurunan rata-rata walk-in per cabang per bulan ---
-            st.markdown("###### 📈 Grafik Tren Rata-rata Walk-in per Cabang per Bulan")
-            bulan_labels_trend = [BULAN_ID.get(int(b), str(b)) for b in bulan_list]
-            wk_month_ordered_cabang = sorted(wk_month["Cabang"].unique(), key=lambda b: _BRANCH_RANK.get(str(b).upper(), 999))
-            fig_trend = go.Figure()
-            _trend_palette = ["#0f766e", "#dc2626", "#d97706", "#2563eb", "#7c3aed", "#db2777", "#059669",
-                               "#ea580c", "#4f46e5", "#16a34a", "#0891b2", "#be123c", "#65a30d", "#9333ea",
-                               "#c026d3", "#0d9488", "#b45309", "#475569"]
-            for i, cabang in enumerate(wk_month_ordered_cabang):
-                sub = wk_month[wk_month["Cabang"] == cabang].set_index("Bulan").reindex(bulan_list)
-                fig_trend.add_trace(go.Scatter(
-                    x=bulan_labels_trend, y=sub["RataRataPerHari"], mode="lines+markers", name=str(cabang),
-                    line=dict(color=_trend_palette[i % len(_trend_palette)], width=2), marker=dict(size=6),
-                ))
-            fig_trend.update_layout(height=420, margin=dict(t=20, b=10, l=10, r=10),
-                                     xaxis_title="Bulan", yaxis_title="Rata-rata Walk-in / Hari",
-                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-            st.plotly_chart(fig_trend, use_container_width=True, key="chart_walkin_trend_bulanan")
+            try:
+                st.markdown("###### 📈 Grafik Tren Rata-rata Walk-in per Cabang per Bulan")
+                bulan_labels_trend = [BULAN_ID.get(int(b), str(b)) for b in bulan_list]
+                wk_month_ordered_cabang = sorted(wk_month["Cabang"].unique(), key=lambda b: _BRANCH_RANK.get(str(b).upper(), 999))
+                fig_trend = go.Figure()
+                _trend_palette = ["#0f766e", "#dc2626", "#d97706", "#2563eb", "#7c3aed", "#db2777", "#059669",
+                                   "#ea580c", "#4f46e5", "#16a34a", "#0891b2", "#be123c", "#65a30d", "#9333ea",
+                                   "#c026d3", "#0d9488", "#b45309", "#475569"]
+                for i, cabang in enumerate(wk_month_ordered_cabang):
+                    sub = wk_month[wk_month["Cabang"] == cabang].set_index("Bulan").reindex(bulan_list)
+                    fig_trend.add_trace(go.Scatter(
+                        x=bulan_labels_trend, y=sub["RataRataPerHari"], mode="lines+markers", name=str(cabang),
+                        line=dict(color=_trend_palette[i % len(_trend_palette)], width=2), marker=dict(size=6),
+                    ))
+                fig_trend.update_layout(height=420, margin=dict(t=20, b=10, l=10, r=10),
+                                         xaxis_title="Bulan", yaxis_title="Rata-rata Walk-in / Hari",
+                                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+                st.plotly_chart(fig_trend, use_container_width=True, key="chart_walkin_trend_bulanan")
+            except Exception as e:
+                st.error(f"Gagal menampilkan grafik tren bulanan: {e}")
 
             # --- Export tambahan: Excel (ringkasan+pencapaian+detail bulanan) & JPG/PDF detail bulanan ---
             st.markdown("###### 📤 Export Tambahan")
             exp_col3, exp_col4, exp_col5 = st.columns(3)
             with exp_col3:
-                st.download_button(
-                    "📊 Export Excel",
-                    data=generate_walkin_excel(walkin_current, wk_month, walkin_achievement,
-                                                periode_label=quarter_period_label_full,
-                                                target_per_hari=WALKIN_TARGET_PER_HARI),
-                    file_name="walkin_dashboard.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                try:
+                    st.download_button(
+                        "📊 Export Excel",
+                        data=generate_walkin_excel(walkin_current, wk_month, walkin_achievement,
+                                                    periode_label=quarter_period_label_full,
+                                                    target_per_hari=WALKIN_TARGET_PER_HARI),
+                        file_name="walkin_dashboard.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                except Exception as e:
+                    st.error(f"Gagal membuat export Excel: {e}")
             with exp_col4:
-                st.download_button(
-                    "🖼️ Export JPG Detail Bulanan",
-                    data=generate_walkin_monthly_detail_image(wk_month, periode_label=quarter_period_label_full),
-                    file_name="walkin_detail_bulanan.jpg",
-                    mime="image/jpeg",
-                )
+                try:
+                    st.download_button(
+                        "🖼️ Export JPG Detail Bulanan",
+                        data=generate_walkin_monthly_detail_image(wk_month, periode_label=quarter_period_label_full),
+                        file_name="walkin_detail_bulanan.jpg",
+                        mime="image/jpeg",
+                    )
+                except Exception as e:
+                    st.error(f"Gagal membuat export JPG detail bulanan: {e}")
             with exp_col5:
-                st.download_button(
-                    "📄 Export PDF Detail Bulanan",
-                    data=generate_walkin_monthly_detail_pdf(wk_month, periode_label=quarter_period_label_full),
-                    file_name="walkin_detail_bulanan.pdf",
-                    mime="application/pdf",
-                )
+                try:
+                    st.download_button(
+                        "📄 Export PDF Detail Bulanan",
+                        data=generate_walkin_monthly_detail_pdf(wk_month, periode_label=quarter_period_label_full),
+                        file_name="walkin_detail_bulanan.pdf",
+                        mime="application/pdf",
+                    )
+                except Exception as e:
+                    st.error(f"Gagal membuat export PDF detail bulanan: {e}")
 
             with st.expander("Rincian: Pesanan (DO) vs Beli Langsung per bulan"):
                 det = wk_month.copy()
