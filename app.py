@@ -1494,17 +1494,32 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
         <td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:{color};font-weight:700;">{format_number(total)}</td>
         {rata2_cell}
         </tr>"""
+    # Baris ringkasan RATA-RATA seluruh cabang di paling bawah tabel, supaya
+    # user tidak perlu scroll balik ke atas untuk lihat rata-rata keseluruhan.
+    rata2_summary_cell = ""
+    if has_rata2:
+        overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
+        rata2_summary_cell = (
+            f'<td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;'
+            f'text-align:right;color:#0f766e;font-weight:800;">{format_decimal(overall_avg_per_hari)}</td>'
+        )
+    summary_row = f"""<tr style="background:#f0fdfa;">
+    <td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;font-weight:800;color:#0f766e;">RATA-RATA SELURUH CABANG</td>
+    <td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;text-align:right;color:#0f766e;font-weight:800;">{format_number(overall_avg)}</td>
+    {rata2_summary_cell}
+    </tr>"""
     rata2_header = '<th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;">Rata-rata / Hari</th>' if has_rata2 else ""
     return f"""<table style="width:100%;border-collapse:collapse;">
     <thead><tr style="background:#f3f4f6;">
     <th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:left;">Cabang</th>
     <th style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;">Total Walk-in</th>
     {rata2_header}
-    </tr></thead><tbody>{rows_html}</tbody></table>"""
+    </tr></thead><tbody>{rows_html}{summary_row}</tbody></table>"""
 
 
 def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in per Cabang") -> bytes:
     has_rata2 = "RataRataPerHari" in df_summary.columns
+    overall_avg = _walkin_overall_avg(df_summary)
     fig, ax = plt.subplots(figsize=(6, max(2, 0.4 * len(df_summary) + 1)))
     ax.axis("off")
     if df_summary.empty:
@@ -1513,14 +1528,46 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
         if has_rata2:
             table_data = [[r["Cabang"], format_number(r["TotalWalkin"]), format_decimal(r["RataRataPerHari"])] for _, r in df_summary.iterrows()]
             col_labels = ["Cabang", "Total Walk-in", "Rata-rata / Hari"]
+            overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
+            table_data.append(["RATA-RATA", format_number(overall_avg), format_decimal(overall_avg_per_hari)])
         else:
             table_data = [[r["Cabang"], format_number(r["TotalWalkin"])] for _, r in df_summary.iterrows()]
             col_labels = ["Cabang", "Total Walk-in"]
-        tbl = ax.table(cellText=table_data, colLabels=col_labels, loc="center", cellLoc="center")
+            table_data.append(["RATA-RATA", format_number(overall_avg)])
+        n_cols = len(col_labels)
+        first_w = 0.45
+        rest_w = (1 - first_w) / (n_cols - 1)
+        col_widths = [first_w] + [rest_w] * (n_cols - 1)
+        tbl = ax.table(cellText=table_data, colLabels=col_labels, colWidths=col_widths, loc="center", cellLoc="center")
         tbl.auto_set_font_size(False)
         tbl.set_fontsize(9)
         tbl.scale(1, 1.4)
-    ax.set_title(title, fontweight="bold")
+        n_rows = len(table_data)
+        for j in range(n_cols):
+            tbl[0, j].set_text_props(ha="center")
+        tbl[n_rows, 0].set_text_props(ha="left")
+        tbl[n_rows, 0]._loc = "left"
+        # Header row: teal background, putih bold.
+        for j in range(n_cols):
+            cell = tbl[0, j]
+            cell.set_facecolor("#0f766e")
+            cell.get_text().set_color("white")
+            cell.get_text().set_fontweight("bold")
+        # Body rows: zebra striping + warna hijau/merah utk Total Walk-in vs rata-rata.
+        for i, (_, r) in enumerate(df_summary.iterrows(), start=1):
+            row_bg = "#f8fafc" if i % 2 == 0 else "white"
+            for j in range(n_cols):
+                tbl[i, j].set_facecolor(row_bg)
+            total_color = "#16a34a" if r["TotalWalkin"] >= overall_avg else "#dc2626"
+            tbl[i, 1].get_text().set_color(total_color)
+            tbl[i, 1].get_text().set_fontweight("bold")
+        # Baris ringkasan RATA-RATA paling bawah: highlight teal muda.
+        for j in range(n_cols):
+            cell = tbl[n_rows, j]
+            cell.set_facecolor("#f0fdfa")
+            cell.get_text().set_color("#0f766e")
+            cell.get_text().set_fontweight("bold")
+    ax.set_title(title, fontweight="bold", color="#0f766e")
     buf = io.BytesIO()
     fig.savefig(buf, format="jpg", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -1528,26 +1575,101 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
 
 
 def generate_walkin_table_pdf(df_summary: pd.DataFrame, title: str = "Walk-in per Cabang") -> bytes:
+    """Export PDF Walk-in dengan tampilan berwarna & rapi (header teal, baris
+    zebra, warna hijau/merah utk di atas/bawah rata-rata, baris ringkasan
+    rata-rata di paling bawah) - pakai reportlab.platypus Table supaya lebih
+    menarik dibanding versi lama yang cuma teks polos hitam-putih."""
     from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+
     has_rata2 = "RataRataPerHari" in df_summary.columns
+    overall_avg = _walkin_overall_avg(df_summary)
+
+    TEAL = rl_colors.HexColor("#0f766e")
+    TEAL_LIGHT = rl_colors.HexColor("#f0fdfa")
+    GREEN = rl_colors.HexColor("#16a34a")
+    RED = rl_colors.HexColor("#dc2626")
+    GRAY_ROW = rl_colors.HexColor("#f8fafc")
+    GRID = rl_colors.HexColor("#e5e7eb")
+    TEXT_DARK = rl_colors.HexColor("#111827")
+
     buf = io.BytesIO()
-    c = pdf_canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, height - 50, title)
-    c.setFont("Helvetica", 10)
-    y = height - 90
-    for _, r in df_summary.iterrows():
-        c.drawString(40, y, str(r["Cabang"]))
-        c.drawRightString(300, y, format_number(r["TotalWalkin"]))
-        if has_rata2:
-            c.drawRightString(420, y, format_decimal(r["RataRataPerHari"]))
-        y -= 18
-        if y < 60:
-            c.showPage()
-            y = height - 50
-    c.save()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=15 * mm,
+                             leftMargin=18 * mm, rightMargin=18 * mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("WalkinTitle", parent=styles["Title"], textColor=TEAL, fontSize=18,
+                                  spaceAfter=2, alignment=TA_LEFT)
+    subtitle_style = ParagraphStyle("WalkinSubtitle", parent=styles["Normal"], textColor=rl_colors.HexColor("#6b7280"),
+                                     fontSize=9, spaceAfter=10, alignment=TA_LEFT)
+
+    elements = [Paragraph(title, title_style),
+                Paragraph(f"Dibuat otomatis oleh Dashboard Omset MFlash · {date.today().strftime('%d %B %Y')}", subtitle_style)]
+
+    if df_summary.empty:
+        elements.append(Paragraph("Belum ada data Walk-in.", styles["Normal"]))
+    else:
+        header = ["Cabang", "Total Walk-in"] + (["Rata-rata / Hari"] if has_rata2 else [])
+        data = [header]
+        for _, r in df_summary.iterrows():
+            row = [str(r["Cabang"]), format_number(r["TotalWalkin"])]
+            if has_rata2:
+                row.append(format_decimal(r["RataRataPerHari"]))
+            data.append(row)
+        overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean()) if has_rata2 else None
+        summary_row = ["RATA-RATA SELURUH CABANG", format_number(overall_avg)] + (
+            [format_decimal(overall_avg_per_hari)] if has_rata2 else []
+        )
+        data.append(summary_row)
+
+        n_cols = len(header)
+        col_widths = [70 * mm] + [ (170 - 70) * mm / (n_cols - 1) ] * (n_cols - 1)
+        tbl = Table(data, colWidths=col_widths, repeatRows=1)
+
+        style_cmds = [
+            ("BACKGROUND", (0, 0), (-1, 0), TEAL),
+            ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 10),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("ALIGN", (0, 0), (0, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 1), (-1, -1), 9.5),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.6, GRID),
+            ("LINEABOVE", (0, -1), (-1, -1), 1.4, TEAL),
+        ]
+        n_data_rows = len(data) - 2  # tanpa header & baris ringkasan
+        for i in range(1, n_data_rows + 1):
+            if i % 2 == 0:
+                style_cmds.append(("BACKGROUND", (0, i), (-1, i), GRAY_ROW))
+            total_val = df_summary.iloc[i - 1]["TotalWalkin"]
+            color = GREEN if total_val >= overall_avg else RED
+            style_cmds.append(("TEXTCOLOR", (1, i), (1, i), color))
+            style_cmds.append(("FONTNAME", (1, i), (1, i), "Helvetica-Bold"))
+        last = len(data) - 1
+        style_cmds += [
+            ("BACKGROUND", (0, last), (-1, last), TEAL_LIGHT),
+            ("TEXTCOLOR", (0, last), (-1, last), TEAL),
+            ("FONTNAME", (0, last), (-1, last), "Helvetica-Bold"),
+            ("FONTSIZE", (0, last), (-1, last), 9.5),
+        ]
+        tbl.setStyle(TableStyle(style_cmds))
+        elements.append(tbl)
+        elements.append(Spacer(1, 10 * mm))
+        legend_style = ParagraphStyle("WalkinLegend", parent=styles["Normal"], textColor=rl_colors.HexColor("#6b7280"), fontSize=8)
+        elements.append(Paragraph(
+            "<font color='#16a34a'>&#9632;</font> di atas / sama dengan rata-rata &nbsp;&nbsp; "
+            "<font color='#dc2626'>&#9632;</font> di bawah rata-rata", legend_style))
+
+    doc.build(elements)
     return buf.getvalue()
 
 
