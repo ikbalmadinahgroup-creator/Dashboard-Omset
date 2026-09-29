@@ -1530,7 +1530,7 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
         if has_rata2:
             rata2_cell = (
                 f'<td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:#374151;">'
-                f'{format_decimal(r["RataRataPerHari"])}</td>'
+                f'{format_number(r["RataRataPerHari"])}</td>'
             )
         ach_cell = ""
         if has_ach:
@@ -1540,7 +1540,7 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
                 f'<td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:{kat_color};font-weight:800;">'
                 f'{format_decimal(r["Pencapaian"])}%</td>'
                 f'<td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:center;">'
-                f'<span style="background:{kat_color};color:white;padding:2px 12px;border-radius:12px;font-size:0.82em;font-weight:700;">{kat.upper()}</span></td>'
+                f'<span style="background:{kat_color};color:white;padding:2px 12px;border-radius:12px;font-size:0.82em;font-weight:700;">{_walkin_status_label(kat)}</span></td>'
             )
         rows_html += f"""<tr>
         <td style="padding:8px 12px;border:1px solid #e5e7eb;">{r['Cabang']}</td>
@@ -1555,7 +1555,7 @@ def render_walkin_table_html(df_summary: pd.DataFrame, overall_avg: float) -> st
         overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
         rata2_summary_cell = (
             f'<td style="padding:8px 12px;border:1px solid #e5e7eb;border-top:2px solid #0f766e;'
-            f'text-align:right;color:#0f766e;font-weight:800;">{format_decimal(overall_avg_per_hari)}</td>'
+            f'text-align:right;color:#0f766e;font-weight:800;">{format_number(overall_avg_per_hari)}</td>'
         )
     ach_summary_cell = ""
     if has_ach:
@@ -1622,10 +1622,10 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
         ax.text(0.5, 0.5, "Tidak ada data", ha="center", va="center")
     else:
         if has_rata2:
-            table_data = [[r["Cabang"], format_number(r["TotalWalkin"]), format_decimal(r["RataRataPerHari"])] for _, r in df_summary.iterrows()]
+            table_data = [[r["Cabang"], format_number(r["TotalWalkin"]), format_number(r["RataRataPerHari"])] for _, r in df_summary.iterrows()]
             col_labels = ["Cabang", "Total\nWalk-in", "Rata-rata\n/ Hari"]
             overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
-            summary_row_vals = ["RATA-RATA", format_number(overall_avg), format_decimal(overall_avg_per_hari)]
+            summary_row_vals = ["RATA-RATA", format_number(overall_avg), format_number(overall_avg_per_hari)]
         else:
             table_data = [[r["Cabang"], format_number(r["TotalWalkin"])] for _, r in df_summary.iterrows()]
             col_labels = ["Cabang", "Total\nWalk-in"]
@@ -1635,7 +1635,7 @@ def generate_walkin_table_image(df_summary: pd.DataFrame, title: str = "Walk-in 
             ach_col_idx = len(col_labels)
             col_labels = col_labels + ["%\nPencapaian", "Status"]
             for i, (_, r) in enumerate(df_summary.iterrows()):
-                table_data[i] += [f"{format_decimal(r['Pencapaian'])}%", str(r["Kategori"]).upper()]
+                table_data[i] += [f"{format_decimal(r['Pencapaian'])}%", _walkin_status_label(r["Kategori"])]
             avg_pencapaian = float(df_summary["Pencapaian"].mean())
             summary_row_vals += [f"{format_decimal(avg_pencapaian)}%", ""]
         table_data.append(summary_row_vals)
@@ -1754,13 +1754,13 @@ def generate_walkin_table_pdf(df_summary: pd.DataFrame, title: str = "Walk-in pe
         for _, r in df_summary.iterrows():
             row = [str(r["Cabang"]), format_number(r["TotalWalkin"])]
             if has_rata2:
-                row.append(format_decimal(r["RataRataPerHari"]))
+                row.append(format_number(r["RataRataPerHari"]))
             if has_ach:
-                row += [f"{format_decimal(r['Pencapaian'])}%", str(r["Kategori"]).upper()]
+                row += [f"{format_decimal(r['Pencapaian'])}%", _walkin_status_label(r["Kategori"])]
             data.append(row)
         overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean()) if has_rata2 else None
         summary_row = ["RATA-RATA SELURUH CABANG", format_number(overall_avg)] + (
-            [format_decimal(overall_avg_per_hari)] if has_rata2 else []
+            [format_number(overall_avg_per_hari)] if has_rata2 else []
         )
         if has_ach:
             avg_pencapaian_pdf = float(df_summary["Pencapaian"].mean())
@@ -1848,6 +1848,13 @@ _WALKIN_KATEGORI_COLOR = {"Merah": "#dc2626", "Kuning": "#d97706", "Hijau": "#16
 _WALKIN_KATEGORI_BG = {"Merah": "#fef2f2", "Kuning": "#fffbeb", "Hijau": "#f0fdf4"}
 
 
+def _walkin_status_label(kategori: str) -> str:
+    """Label status yang ditampilkan ke user: cuma 2 kondisi (TERCAPAI /
+    BELUM TERCAPAI), bukan nama warna (Hijau/Kuning/Merah) - warna tetap
+    dipakai untuk pewarnaan sel/badge, tapi teksnya disederhanakan."""
+    return "TERCAPAI" if kategori == "Hijau" else "BELUM TERCAPAI"
+
+
 def render_walkin_achievement_html(df_ach: pd.DataFrame, target_per_hari: float = 25.0) -> str:
     if df_ach.empty:
         return "<p style='color:#6b7280;'>Belum ada data pencapaian target.</p>"
@@ -1860,8 +1867,8 @@ def render_walkin_achievement_html(df_ach: pd.DataFrame, target_per_hari: float 
         bar_w = max(0, min(100, pct))
         rows_html += f"""<tr style="background:{bg};">
         <td style="padding:8px 12px;border:1px solid #e5e7eb;">{r['Cabang']}</td>
-        <td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:#374151;">{format_decimal(r['RataRataPerHari'])}</td>
-        <td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:#374151;">{format_decimal(target_per_hari)}</td>
+        <td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:#374151;">{format_number(r['RataRataPerHari'])}</td>
+        <td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:right;color:#374151;">{format_number(target_per_hari)}</td>
         <td style="padding:8px 12px;border:1px solid #e5e7eb;">
             <div style="display:flex;align-items:center;gap:8px;">
                 <div style="flex:1;background:#e5e7eb;border-radius:6px;height:10px;overflow:hidden;">
@@ -1871,7 +1878,7 @@ def render_walkin_achievement_html(df_ach: pd.DataFrame, target_per_hari: float 
             </div>
         </td>
         <td style="padding:8px 12px;border:1px solid #e5e7eb;text-align:center;">
-            <span style="background:{color};color:white;padding:2px 12px;border-radius:12px;font-size:0.82em;font-weight:700;">{kat.upper()}</span>
+            <span style="background:{color};color:white;padding:2px 12px;border-radius:12px;font-size:0.82em;font-weight:700;">{_walkin_status_label(kat)}</span>
         </td>
         </tr>"""
     return f"""<table style="width:100%;border-collapse:collapse;">
@@ -1951,7 +1958,7 @@ def generate_walkin_excel(df_summary: pd.DataFrame, wk_month: pd.DataFrame, df_a
     overall_avg = _walkin_overall_avg(df_summary)
     r = start_row + 1
     for i, (_, row) in enumerate(df_summary.iterrows()):
-        vals = [row["Cabang"], int(row["TotalWalkin"])] + ([round(float(row["RataRataPerHari"]), 1)] if has_rata2 else [])
+        vals = [row["Cabang"], int(row["TotalWalkin"])] + ([int(round(float(row["RataRataPerHari"])))] if has_rata2 else [])
         for j, v in enumerate(vals, start=1):
             c = ws1.cell(row=r, column=j, value=v)
             c.border = border_all
@@ -1965,7 +1972,7 @@ def generate_walkin_excel(df_summary: pd.DataFrame, wk_month: pd.DataFrame, df_a
         r += 1
     if has_rata2:
         overall_avg_per_hari = float(df_summary["RataRataPerHari"].mean())
-        vals = ["RATA-RATA SELURUH CABANG", int(round(overall_avg))] + ([round(overall_avg_per_hari, 1)] if has_rata2 else [])
+        vals = ["RATA-RATA SELURUH CABANG", int(round(overall_avg))] + ([int(round(overall_avg_per_hari))] if has_rata2 else [])
         for j, v in enumerate(vals, start=1):
             c = ws1.cell(row=r, column=j, value=v)
             c.border = border_all
@@ -1980,7 +1987,7 @@ def generate_walkin_excel(df_summary: pd.DataFrame, wk_month: pd.DataFrame, df_a
     # ---------- Sheet 2: Pencapaian Target ----------
     ws2 = wb.create_sheet("Pencapaian Target")
     headers2 = ["Cabang", "Rata-rata / Hari", "Target / Hari", "% Pencapaian", "Status"]
-    start_row2 = _add_header(ws2, f"PENCAPAIAN TARGET WALK-IN ({format_decimal(target_per_hari)}/HARI)", len(headers2))
+    start_row2 = _add_header(ws2, f"PENCAPAIAN TARGET WALK-IN ({format_number(target_per_hari)}/HARI)", len(headers2))
     for j, h in enumerate(headers2, start=1):
         c = ws2.cell(row=start_row2, column=j, value=h)
         c.font = header_font
@@ -1992,8 +1999,8 @@ def generate_walkin_excel(df_summary: pd.DataFrame, wk_month: pd.DataFrame, df_a
     r = start_row2 + 1
     for _, row in df_ach.iterrows():
         kat = row["Kategori"]
-        vals = [row["Cabang"], round(float(row["RataRataPerHari"]), 1), round(float(row["Target"]), 1),
-                round(float(row["Pencapaian"]), 1), kat.upper()]
+        vals = [row["Cabang"], int(round(float(row["RataRataPerHari"]))), int(round(float(row["Target"]))),
+                round(float(row["Pencapaian"]), 1), _walkin_status_label(kat)]
         for j, v in enumerate(vals, start=1):
             c = ws2.cell(row=r, column=j, value=v)
             c.border = border_all
@@ -2085,7 +2092,7 @@ def generate_walkin_monthly_detail_image(wk_month: pd.DataFrame, periode_label: 
         for b in bulan_list:
             tot_v = int(piv_tot.loc[cabang, b]) if cabang in piv_tot.index else 0
             avg_v = float(piv_avg.loc[cabang, b]) if cabang in piv_avg.index else 0.0
-            row += [format_number(tot_v), format_decimal(avg_v)]
+            row += [format_number(tot_v), format_number(avg_v)]
         table_data.append(row)
 
     n_table_rows = max(1, len(table_data) + 1)
@@ -2200,7 +2207,7 @@ def generate_walkin_monthly_detail_pdf(wk_month: pd.DataFrame, periode_label: st
             for b in bulan_list:
                 tot_v = int(piv_tot.loc[cabang, b]) if cabang in piv_tot.index else 0
                 avg_v = float(piv_avg.loc[cabang, b]) if cabang in piv_avg.index else 0.0
-                row += [format_number(tot_v), format_decimal(avg_v)]
+                row += [format_number(tot_v), format_number(avg_v)]
             data.append(row)
 
         n_cols = len(header)
@@ -3717,7 +3724,7 @@ with tab4:
         overall_avg_per_hari = float(walkin_current["RataRataPerHari"].mean()) if "RataRataPerHari" in walkin_current.columns else 0.0
         st.markdown(
             f"**Rata-rata Walk-in seluruh cabang:** {format_number(overall_avg)} "
-            f"&nbsp;|&nbsp; **Rata-rata per hari seluruh cabang ({BULAN_ID.get(tanggal_acuan.month, '')}):** {format_decimal(overall_avg_per_hari)}"
+            f"&nbsp;|&nbsp; **Rata-rata per hari seluruh cabang ({BULAN_ID.get(tanggal_acuan.month, '')}):** {format_number(overall_avg_per_hari)}"
         )
         st.caption(
             f"Total Walk-in = kumulatif kuartal berjalan ({quarter_period_label}). "
@@ -3747,7 +3754,7 @@ with tab4:
             n_kuning = int((walkin_achievement["Kategori"] == "Kuning").sum())
             n_hijau = int((walkin_achievement["Kategori"] == "Hijau").sum())
             st.caption(
-                f"🎯 Target: {format_decimal(WALKIN_TARGET_PER_HARI)} walk-in/hari per cabang (bulan {BULAN_ID.get(tanggal_acuan.month, '')}). "
+                f"🎯 Target: {format_number(WALKIN_TARGET_PER_HARI)} walk-in/hari per cabang (bulan {BULAN_ID.get(tanggal_acuan.month, '')}). "
                 f"🔴 Merah &lt; 85% ({n_merah} cabang) &nbsp;|&nbsp; 🟡 Kuning 85% - 99,99% ({n_kuning} cabang) &nbsp;|&nbsp; "
                 f"🟢 Hijau ≥ 100% ({n_hijau} cabang)."
             )
@@ -3795,6 +3802,19 @@ with tab4:
             tbl_wk = pd.concat([tbl_wk, pd.DataFrame([{"Cabang": "TOTAL", **tot_wk.to_dict()}])], ignore_index=True)
             st.dataframe(tbl_wk, use_container_width=True, hide_index=True)
 
+            st.markdown("###### 📈 Rata-rata Walk-in per Hari per Minggu")
+            st.caption("Rata-rata = jumlah walk-in minggu tsb dibagi hari yang sudah berjalan di minggu itu "
+                       "(minggu berjalan dihitung s/d Tanggal Acuan, minggu yang sudah lewat dihitung penuh 7 hari).")
+            tbl_wk_avg = wk_weekly.pivot_table(index="Cabang", columns="Minggu", values="RataRataPerHari", aggfunc="sum", fill_value=0)
+            tbl_wk_avg = tbl_wk_avg.reindex(columns=minggu_list)
+            tbl_wk_avg.columns = minggu_labels
+            tbl_wk_avg = tbl_wk_avg.round(0).astype(int)
+            tbl_wk_avg = tbl_wk_avg.reset_index()
+            tbl_wk_avg = _walkin_ordered(tbl_wk_avg)
+            rata2_wk_row = tbl_wk_avg.drop(columns=["Cabang"]).mean().round(0).astype(int)
+            tbl_wk_avg = pd.concat([tbl_wk_avg, pd.DataFrame([{"Cabang": "RATA-RATA", **rata2_wk_row.to_dict()}])], ignore_index=True)
+            st.dataframe(tbl_wk_avg, use_container_width=True, hide_index=True)
+
             wk_ordered_cabang = sorted(wk_weekly["Cabang"].unique(), key=lambda b: _BRANCH_RANK.get(str(b).upper(), 999))
             fig_weekly = go.Figure()
             _weekly_palette = ["#0f766e", "#dc2626", "#d97706", "#2563eb", "#7c3aed", "#db2777", "#059669",
@@ -3837,10 +3857,10 @@ with tab4:
             tbl_avg = wk_month.pivot_table(index="Cabang", columns="Bulan", values="RataRataPerHari", aggfunc="sum", fill_value=0)
             tbl_avg = tbl_avg.reindex(columns=bulan_list)
             tbl_avg.columns = [BULAN_ID.get(int(b), str(b)) for b in tbl_avg.columns]
-            tbl_avg = tbl_avg.round(1)
+            tbl_avg = tbl_avg.round(0).astype(int)
             tbl_avg = tbl_avg.reset_index()
             tbl_avg = _walkin_ordered(tbl_avg)
-            rata2_row = tbl_avg.drop(columns=["Cabang"]).mean().round(1)
+            rata2_row = tbl_avg.drop(columns=["Cabang"]).mean().round(0).astype(int)
             tbl_avg = pd.concat([tbl_avg, pd.DataFrame([{"Cabang": "RATA-RATA", **rata2_row.to_dict()}])], ignore_index=True)
             st.dataframe(tbl_avg, use_container_width=True, hide_index=True)
 
