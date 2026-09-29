@@ -1425,10 +1425,11 @@ def _quarter_bounds_for(d: date):
 def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date) -> pd.DataFrame:
     """Total Walk-in KUMULATIF dari awal kuartal (1 Juli/Okt/Jan/Apr) sampai
     tanggal_acuan (inklusif) - konsisten dengan S/D HARI INI di Scoreboard.
-    Selain Total Walk-in, sekarang juga menghitung RataRataPerHari (= Total
-    Walk-in dibagi jumlah hari yang sudah berjalan di kuartal ini sampai
-    tanggal_acuan), supaya user bisa langsung melihat rata-rata walk-in per
-    hari per cabang, bukan cuma totalnya."""
+    RataRataPerHari dihitung dari BULAN BERJALAN saja (bukan rata-rata dari
+    total kuartal) - mis. kalau tanggal_acuan di bulan September, rata-rata
+    yang ditampilkan adalah rata-rata walk-in September s/d tanggal_acuan,
+    supaya mencerminkan tren bulan berjalan, bukan tercampur rata-rata bulan
+    sebelumnya yang traffic-nya bisa jauh berbeda."""
     if df.empty:
         return pd.DataFrame(columns=["Cabang", "TotalWalkin", "RataRataPerHari"])
     q_start, q_end, _, hari_berjalan, _ = _quarter_bounds_for(tanggal_acuan)
@@ -1438,7 +1439,23 @@ def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date) -> pd
         return pd.DataFrame(columns=["Cabang", "TotalWalkin", "RataRataPerHari"])
     g = sub.groupby("Cabang")["NomorPengiriman"].nunique().reset_index()
     g.columns = ["Cabang", "TotalWalkin"]
-    g["RataRataPerHari"] = g["TotalWalkin"] / hari_berjalan if hari_berjalan else 0.0
+
+    # Rata-rata per hari = walk-in BULAN BERJALAN (1 s/d tanggal_acuan bulan
+    # ini) dibagi hari yang sudah lewat di bulan itu, bukan dibagi hari
+    # sekuartal - supaya rata-rata selalu mencerminkan bulan berjalan saat ini.
+    month_start = date(tanggal_acuan.year, tanggal_acuan.month, 1)
+    mask_bulan = (df["Tanggal"] >= month_start) & (df["Tanggal"] <= tanggal_acuan)
+    sub_bulan = df[mask_bulan]
+    hari_berjalan_bulan = tanggal_acuan.day
+    if not sub_bulan.empty:
+        g_bulan = sub_bulan.groupby("Cabang")["NomorPengiriman"].nunique().reset_index()
+        g_bulan.columns = ["Cabang", "TotalWalkinBulanIni"]
+        g = g.merge(g_bulan, on="Cabang", how="left")
+    else:
+        g["TotalWalkinBulanIni"] = 0
+    g["TotalWalkinBulanIni"] = g["TotalWalkinBulanIni"].fillna(0)
+    g["RataRataPerHari"] = g["TotalWalkinBulanIni"] / hari_berjalan_bulan if hari_berjalan_bulan else 0.0
+    g = g.drop(columns=["TotalWalkinBulanIni"])
     return g
 
 
@@ -3011,7 +3028,12 @@ with tab4:
         overall_avg_per_hari = float(walkin_current["RataRataPerHari"].mean()) if "RataRataPerHari" in walkin_current.columns else 0.0
         st.markdown(
             f"**Rata-rata Walk-in seluruh cabang:** {format_number(overall_avg)} "
-            f"&nbsp;|&nbsp; **Rata-rata per hari seluruh cabang:** {format_decimal(overall_avg_per_hari)}"
+            f"&nbsp;|&nbsp; **Rata-rata per hari seluruh cabang ({BULAN_ID.get(tanggal_acuan.month, '')}):** {format_decimal(overall_avg_per_hari)}"
+        )
+        st.caption(
+            f"Total Walk-in = kumulatif kuartal berjalan ({quarter_period_label}). "
+            f"Rata-rata / Hari = rata-rata walk-in bulan {BULAN_ID.get(tanggal_acuan.month, '')} "
+            f"s/d tanggal {tanggal_acuan.day} saja (bukan rata-rata sekuartal), supaya mencerminkan tren bulan berjalan."
         )
         st.markdown(render_walkin_table_html(walkin_current, overall_avg), unsafe_allow_html=True)
 
@@ -3045,6 +3067,20 @@ with tab4:
             tot = tbl.drop(columns=["Cabang"]).sum()
             tbl = pd.concat([tbl, pd.DataFrame([{"Cabang": "TOTAL", **tot.to_dict()}])], ignore_index=True)
             st.dataframe(tbl, use_container_width=True, hide_index=True)
+
+            st.markdown("###### 📈 Rata-rata Walk-in per Hari per Bulan")
+            st.caption("Rata-rata = jumlah walk-in bulan tsb dibagi hari yang sudah berjalan di bulan itu "
+                       "(bulan berjalan dihitung s/d Tanggal Acuan, bulan yang sudah lewat dihitung penuh sebulan).")
+            tbl_avg = wk_month.pivot_table(index="Cabang", columns="Bulan", values="RataRataPerHari", aggfunc="sum", fill_value=0)
+            tbl_avg = tbl_avg.reindex(columns=bulan_list)
+            tbl_avg.columns = [BULAN_ID.get(int(b), str(b)) for b in tbl_avg.columns]
+            tbl_avg = tbl_avg.round(1)
+            tbl_avg = tbl_avg.reset_index()
+            tbl_avg = _walkin_ordered(tbl_avg)
+            rata2_row = tbl_avg.drop(columns=["Cabang"]).mean().round(1)
+            tbl_avg = pd.concat([tbl_avg, pd.DataFrame([{"Cabang": "RATA-RATA", **rata2_row.to_dict()}])], ignore_index=True)
+            st.dataframe(tbl_avg, use_container_width=True, hide_index=True)
+
             with st.expander("Rincian: Pesanan (DO) vs Beli Langsung per bulan"):
                 det = wk_month.copy()
                 det["Bulan"] = det["Bulan"].apply(lambda b: BULAN_ID.get(int(b), str(b)))
