@@ -1387,6 +1387,22 @@ def aggregate_walkin_monthly(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _walkin_effective_last_date(df: pd.DataFrame, tanggal_acuan: date) -> date:
+    """Tanggal efektif terakhir yang datanya BENAR-BENAR ada di df (dipakai
+    sbg pembagi rata-rata per hari), supaya rata-rata tidak under-estimate
+    kalau upload data belum sampai tanggal_acuan - mis. hari ini tanggal 29
+    tapi data baru ke-upload s/d tanggal 28. Kalau data malah lebih baru dari
+    tanggal_acuan (tidak wajar tapi jaga-jaga), tetap dibatasi max tanggal_acuan."""
+    if df.empty or "Tanggal" not in df.columns:
+        return tanggal_acuan
+    last_data = df["Tanggal"].max()
+    if pd.isna(last_data):
+        return tanggal_acuan
+    if hasattr(last_data, "date") and not isinstance(last_data, date):
+        last_data = last_data.date()
+    return min(last_data, tanggal_acuan)
+
+
 def aggregate_walkin_monthly_split(df: pd.DataFrame, tanggal_acuan: date) -> pd.DataFrame:
     """Walk-in per cabang per bulan di kuartal berjalan (s/d tanggal_acuan),
     dipecah Pesanan (DO) vs Beli Langsung."""
@@ -1403,10 +1419,16 @@ def aggregate_walkin_monthly_split(df: pd.DataFrame, tanggal_acuan: date) -> pd.
         if c not in g.columns:
             g[c] = 0
     g["Total"] = g["Pesanan (DO)"] + g["Beli Langsung"]
+    effective_acuan = _walkin_effective_last_date(df, tanggal_acuan)
     def _hari(b):
         b = int(b)
         last = calendar.monthrange(tanggal_acuan.year, b)[1]
-        return tanggal_acuan.day if b == tanggal_acuan.month else last
+        if b != tanggal_acuan.month:
+            return last
+        month_start_b = date(tanggal_acuan.year, b, 1)
+        if effective_acuan >= month_start_b:
+            return (effective_acuan - month_start_b).days + 1
+        return tanggal_acuan.day
     g["Hari"] = g["Bulan"].apply(_hari)
     g["RataRataPerHari"] = g["Total"] / g["Hari"]
     return g
@@ -1449,7 +1471,11 @@ def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date) -> pd
     month_start = date(tanggal_acuan.year, tanggal_acuan.month, 1)
     mask_bulan = (df["Tanggal"] >= month_start) & (df["Tanggal"] <= tanggal_acuan)
     sub_bulan = df[mask_bulan]
-    hari_berjalan_bulan = tanggal_acuan.day
+    effective_acuan = _walkin_effective_last_date(df, tanggal_acuan)
+    if effective_acuan >= month_start:
+        hari_berjalan_bulan = (effective_acuan - month_start).days + 1
+    else:
+        hari_berjalan_bulan = tanggal_acuan.day
     if not sub_bulan.empty:
         g_bulan = sub_bulan.groupby("Cabang")["NomorPengiriman"].nunique().reset_index()
         g_bulan.columns = ["Cabang", "TotalWalkinBulanIni"]
@@ -1467,20 +1493,24 @@ def _week_of_month(d: date) -> int:
     return (d.day - 1) // 7 + 1
 
 
-def _hari_in_week(minggu: int, tanggal_acuan: date) -> int:
+def _hari_in_week(minggu: int, tanggal_acuan: date, effective_acuan: date = None) -> int:
     """Jumlah hari yang sudah berjalan di minggu tsb (dalam bulan tanggal_acuan).
     Minggu yang sudah lewat penuh dihitung 7 hari (atau sisa hari di akhir
-    bulan kalau minggu terakhir tidak genap 7 hari), minggu berjalan (yang
-    memuat tanggal_acuan) dihitung parsial s/d tanggal_acuan."""
+    bulan kalau minggu terakhir tidak genap 7 hari), minggu berjalan dihitung
+    parsial s/d effective_acuan (tanggal terakhir yang datanya benar-benar ada,
+    bukan tanggal_acuan/hari ini kalau upload data belum sampai situ)."""
+    if effective_acuan is None:
+        effective_acuan = tanggal_acuan
     last_day = calendar.monthrange(tanggal_acuan.year, tanggal_acuan.month)[1]
     week_start_day = (minggu - 1) * 7 + 1
     week_end_day = min(minggu * 7, last_day)
-    if tanggal_acuan.day < week_start_day:
+    ref_day = effective_acuan.day if (effective_acuan.year == tanggal_acuan.year and effective_acuan.month == tanggal_acuan.month) else tanggal_acuan.day
+    if ref_day < week_start_day:
         return 0
-    elif tanggal_acuan.day >= week_end_day:
+    elif ref_day >= week_end_day:
         return week_end_day - week_start_day + 1
     else:
-        return tanggal_acuan.day - week_start_day + 1
+        return ref_day - week_start_day + 1
 
 
 def aggregate_walkin_weekly_current_month(df: pd.DataFrame, tanggal_acuan: date) -> pd.DataFrame:
@@ -1493,10 +1523,11 @@ def aggregate_walkin_weekly_current_month(df: pd.DataFrame, tanggal_acuan: date)
     sub = df[(df["Tanggal"] >= month_start) & (df["Tanggal"] <= tanggal_acuan)].copy()
     if sub.empty:
         return pd.DataFrame(columns=["Cabang", "Minggu", "Total", "Hari", "RataRataPerHari"])
+    effective_acuan = _walkin_effective_last_date(df, tanggal_acuan)
     sub["Minggu"] = sub["Tanggal"].apply(_week_of_month)
     g = sub.groupby(["Cabang", "Minggu"])["NomorPengiriman"].nunique().reset_index()
     g.columns = ["Cabang", "Minggu", "Total"]
-    g["Hari"] = g["Minggu"].apply(lambda m: _hari_in_week(int(m), tanggal_acuan))
+    g["Hari"] = g["Minggu"].apply(lambda m: _hari_in_week(int(m), tanggal_acuan, effective_acuan))
     g["RataRataPerHari"] = g.apply(lambda r: (r["Total"] / r["Hari"]) if r["Hari"] else 0.0, axis=1)
     return g
 
@@ -3722,6 +3753,7 @@ with tab4:
     else:
         overall_avg = _walkin_overall_avg(walkin_current)
         overall_avg_per_hari = float(walkin_current["RataRataPerHari"].mean()) if "RataRataPerHari" in walkin_current.columns else 0.0
+        _walkin_last_data = _walkin_effective_last_date(df_walkin, tanggal_acuan)
         st.markdown(
             f"**Rata-rata Walk-in seluruh cabang:** {format_number(overall_avg)} "
             f"&nbsp;|&nbsp; **Rata-rata per hari seluruh cabang ({BULAN_ID.get(tanggal_acuan.month, '')}):** {format_number(overall_avg_per_hari)}"
@@ -3729,7 +3761,9 @@ with tab4:
         st.caption(
             f"Total Walk-in = kumulatif kuartal berjalan ({quarter_period_label}). "
             f"Rata-rata / Hari = rata-rata walk-in bulan {BULAN_ID.get(tanggal_acuan.month, '')} "
-            f"s/d tanggal {tanggal_acuan.day} saja (bukan rata-rata sekuartal), supaya mencerminkan tren bulan berjalan."
+            f"dibagi jumlah hari s/d **data terakhir yang sudah masuk ({_walkin_last_data.strftime('%d %b %Y')})** "
+            f"- bukan tanggal hari ini kalau upload belum sampai situ, dan bukan rata-rata sekuartal, "
+            f"supaya rata-rata mencerminkan tren bulan berjalan dan tidak under-estimate karena jeda upload."
         )
         # --- Hitung pencapaian target (25/hari) lebih dulu supaya bisa
         # ditempel langsung ke tabel utama & export JPG/PDF utama, jadi
