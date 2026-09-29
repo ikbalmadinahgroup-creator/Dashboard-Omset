@@ -219,7 +219,7 @@ _SYNC_DIR_PAIRS = [
 # di-download ulang, dan TIDAK di-backfill balik ke GitHub. Tanpa ini, file
 # lama yang masih tersisa di container (mis. 18 file cabang lama) akan
 # di-upload lagi oleh backfill dan omset terhitung dobel.
-_MIRRORED_DIRS = {"data/main", "data/_cache", "data/log"}
+_MIRRORED_DIRS = {"data/main", "data/walkin", "data/_cache", "data/log"}
 
 
 def sync_data_from_github():
