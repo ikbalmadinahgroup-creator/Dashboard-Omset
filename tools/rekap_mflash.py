@@ -100,6 +100,54 @@ def add_sales_table(x, sst_lookup=None):
     x=re.sub(r'<dimension ref="[^"]*"/>','<dimension ref="B3:Y40"/>',x,1)
     return x, True
 
+# ---------- Sheet "Omset Bulanan" (dibangun ulang tiap rekap) ----------
+BULAN_NAMA={1:'JANUARI',2:'FEBRUARI',3:'MARET',4:'APRIL',5:'MEI',6:'JUNI',7:'JULI',8:'AGUSTUS',9:'SEPTEMBER',10:'OKTOBER',11:'NOVEMBER',12:'DESEMBER'}
+HARI_NAMA=['SENIN','SELASA','RABU','KAMIS','JUMAT','SABTU','MINGGU']
+def rebuild_omset_bulanan(x, qs, maxd):
+    """Hapus isi lama, buat kotak per bulan (kuartal berjalan s/d bulan data terakhir):
+    judul bulan, header HARI | TANGGAL | 18 cabang | TOTAL, omset per tanggal (SUMIFS ke
+    Faktur Penjualan), baris TOTAL per bulan. Gaya mengikuti kotak buatan user (Mei/Juni 2025)."""
+    FP="'Faktur Penjualan'!"; AN,A,B=[f"{FP}${c}$2:${c}$95212" for c in ('AN','A','B')]
+    cab=list(CABANG.values()); c0=4; cl=c0+len(cab)-1; ct=cl+1   # D .. U, V
+    LC=col(cl); TC=col(ct)
+    rows=[]; merges=[]; r=4
+    def row(rn,cells,ht=None):
+        rows.append(f'<row r="{rn}"'+(f' ht="{ht}" customHeight="1"' if ht else '')+'>'+''.join(cells)+'</row>')
+    def t(ref,s,v): return f'<c r="{ref}" s="{s}" t="inlineStr"><is><t>{html.escape(v,quote=False)}</t></is></c>'
+    def n(ref,s,v): return f'<c r="{ref}" s="{s}"><v>{v}</v></c>'
+    def f(ref,s,fx): return f'<c r="{ref}" s="{s}"><f>{html.escape(fx,quote=False)}</f></c>'
+    m=qs.month
+    while m<=maxd.month and m<qs.month+3:
+        y=qs.year; first=datetime.datetime(y,m,1)
+        nd=(datetime.datetime(y+(m==12),(m%12)+1,1)-first).days
+        row(r,[t(f'B{r}','245',f'{BULAN_NAMA[m]} {y}')]+[f'<c r="{col(k)}{r}" s="245"/>' for k in range(3,ct+1)],24)
+        row(r+1,[f'<c r="{col(k)}{r+1}" s="245"/>' for k in range(2,ct+1)],24)
+        merges.append(f'B{r}:{TC}{r+1}')
+        h=r+3
+        row(h,[t(f'B{h}','87','HARI'),t(f'C{h}','88','TANGGAL')]+[t(f'{col(c0+i)}{h}','89',cb) for i,cb in enumerate(cab)]+[t(f'{TC}{h}','89','TOTAL')],19)
+        d0=h+1
+        for i in range(nd):
+            rr=d0+i; d=first+datetime.timedelta(days=i)
+            cells=[t(f'B{rr}','91',HARI_NAMA[d.weekday()]),n(f'C{rr}','92',(d-EPOCH).days)]
+            cells+=[f(f'{col(c0+k)}{rr}','93',f'SUMIFS({AN},{A},{col(c0+k)}${h},{B},$C{rr})') for k in range(len(cab))]
+            cells.append(f(f'{TC}{rr}','94',f'SUM(D{rr}:{LC}{rr})'))
+            row(rr,cells)
+        tr=d0+nd; dl=tr-1
+        row(tr,[t(f'B{tr}','248','TOTAL'),f'<c r="C{tr}" s="249"/>']+[f(f'{col(k)}{tr}','95',f'SUM({col(k)}{d0}:{col(k)}{dl})') for k in range(c0,ct+1)],19)
+        merges.append(f'B{tr}:C{tr}')
+        r=tr+4; m+=1
+    a=x.index('<sheetData>'); b=x.index('</sheetData>')+len('</sheetData>')
+    x=x[:a]+'<sheetData>'+''.join(rows)+'</sheetData>'+x[b:]
+    x=re.sub(r'<mergeCells[^>]*>.*?</mergeCells>|<mergeCells[^>]*/>','',x,flags=re.S)
+    mc=f'<mergeCells count="{len(merges)}">'+''.join(f'<mergeCell ref="{m_}"/>' for m_ in merges)+'</mergeCells>'
+    x=x.replace('</sheetData>','</sheetData>'+mc,1)
+    x=re.sub(r'<conditionalFormatting.*?</conditionalFormatting>','',x,flags=re.S)
+    x=re.sub(r'<cols>.*?</cols>',f'<cols><col min="2" max="2" width="12" customWidth="1"/><col min="3" max="3" width="14" customWidth="1"/><col min="{c0}" max="{cl}" width="15.5" customWidth="1"/><col min="{ct}" max="{ct}" width="19" customWidth="1"/></cols>',x,1,flags=re.S)
+    x=re.sub(r'<dimension ref="[^"]*"/>',f'<dimension ref="B4:{TC}{r}"/>',x,1)
+    x=re.sub(r'<sheetView ([^>]*?)topLeftCell="[^"]*"',r'<sheetView \1',x,1)
+    x=re.sub(r'<selection [^>]*/>','<selection activeCell="B4" sqref="B4"/>',x,1)
+    return x
+
 def sheet_paths(z):
     wb=z.read('xl/workbook.xml').decode('utf8'); rels=z.read('xl/_rels/workbook.xml.rels').decode('utf8')
     rid={m.group(1):m.group(2) for m in re.finditer(r'<Relationship [^>]*?Id="([^"]+)"[^>]*?Target="([^"]+)"',rels)}
@@ -232,6 +280,9 @@ def build(dash, data, out):
         x2,n=re.subn(r'(<c r="C4"[^>]*>)<v>[^<]*</v>(</c>)',rf'\g<1><v>{serial}</v>\g<2>',x,1)
         if n: rep[p]=x2; print(f'  Scoreboard C4 (TANGGAL) = {maxd.date()}')
         else: print('PERINGATAN: Scoreboard!C4 bukan angka biasa, tidak diubah')
+    if 'Omset Bulanan' in sp:
+        p=sp['Omset Bulanan']; rep[p]=rebuild_omset_bulanan(zin.read(p).decode('utf8'),qs,maxd)
+        print(f'  Omset Bulanan: dibangun ulang {qs:%b}..{maxd:%b %Y} (18 cabang, per tanggal + total bulan)')
     if 'Mark.Corporate' in sp:
         p=sp['Mark.Corporate']; x,added_sales=add_sales_table(rep.get(p) or zin.read(p).decode('utf8'))
         if added_sales: rep[p]=x; print('  Mark.Corporate: tabel Rekap per Sales ditambahkan (S3:Y22)')
