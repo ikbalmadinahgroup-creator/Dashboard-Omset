@@ -25,6 +25,81 @@ def col(n):
     return s
 def cidx(c): return sum((ord(ch)-64)*26**i for i,ch in enumerate(reversed(c)))
 
+# ---------- Rekap per Sales (Mark.Corporate) ----------
+# Nama yang berbeda di Accurate tapi ORANG YANG SAMA (dikonfirmasi user 1 Okt 2026).
+# Pivot & tabel per cabang tetap pakai nama asli (varian nama = penanda cabang);
+# tabel ini menjumlahkan per orang.
+SALES_GROUPS = [
+    ('WAHYU JP', ['WAHYU JP','WAHYU JP (RADJIMAN)','WAHYU JP JATIWARINGIN']),
+    ('DICKY YUNIAWAN', ['DICKY YUNIAWAN']),
+    ('FAISAL ABDUL RAHMAN', ['FAISAL ABDUL RAHMAN']),
+    ('IQBAL SABARI', ['IQBAL SABARI','IQBAL SABARI SALES','IKBAL SABARI']),
+    ('KOUTSAREZRA KANZA', ['KOUTSAREZRA KANZA']),
+    ('M SYAFAAT', ['M SYAFAAT','MUHAMMAD SYAFAAT']),
+    ('RAID IMADUDIN FIRAS', ['RAID IMADUDIN FIRAS']),
+    ('TEGAR PUTRA YANSA', ['TEGAR PUTRA YANSA','TEGAR PUTRA YANSYAH','TEGAR SALES']),
+    ('SUPRIYADI', ['SUPRIYADI']),
+    ('PAOLO MAROLANZANO', ['PAOLO MAROLANZANO']),
+    ('SOLEHUDIN', ['SOLEHUDIN']),
+    ('RIFQI ADITYA', ['RIFQI ADITYA']),
+    ('M FARHAN ZAHRAN', ['M FARHAN ZAHRAN']),
+    ('KAUKABAN AL AKWAN', ['KAUKABAN AL AKWAN']),
+    ('NUR MUIS', ['NUR MUIS']),
+]
+SALES_MARK = 'REKAP PER SALES'
+
+def set_cells(xml, cells):
+    """Sisipkan/timpa sel (dict ref->xml <c>) ke sheetData, urut baris & kolom."""
+    a=xml.index('<sheetData>')+len('<sheetData>'); b=xml.index('</sheetData>'); body=xml[a:b]
+    rows={int(m.group(1)):m.group(0) for m in re.finditer(r'<row r="(\d+)"[^>]*?(?:/>|>.*?</row>)',body,re.S)}
+    byrow={}
+    for ref,cx in cells.items():
+        r=int(re.sub('[A-Z]','',ref)); byrow.setdefault(r,{})[ref]=cx
+    for r,cs in byrow.items():
+        if r in rows:
+            row=rows[r]
+            if row.endswith('/>'): head=row[:-2]+'>'; inner=''
+            else:
+                head=re.match(r'<row [^>]*>',row).group(0); inner=row[len(head):-len('</row>')]
+            head=re.sub(r'\s+spans="[^"]*"','',head)
+            ex={m.group(1):m.group(0) for m in re.finditer(r'<c r="([A-Z]+\d+)"[^>]*?(?:/>|>.*?</c>)',inner,re.S)}
+        else:
+            head=f'<row r="{r}">'; ex={}
+        ex.update(cs)
+        rows[r]=head+''.join(v for k,v in sorted(ex.items(),key=lambda t:cidx(re.sub(r'\d','',t[0]))))+'</row>'
+    nb=''.join(v for k,v in sorted(rows.items()))
+    return xml[:a]+nb+xml[b:]
+
+def add_sales_table(x, sst_lookup=None):
+    if SALES_MARK in x: return x, False
+    FP="'Faktur Penjualan'!"; AN,AP,AS,AT=[f"{FP}${c}$2:${c}$95212" for c in ('AN','AP','AS','AT')]
+    def tcell(ref,s,t): return f'<c r="{ref}" s="{s}" t="inlineStr"><is><t xml:space="preserve">{html.escape(t,quote=False)}</t></is></c>'
+    def fcell(ref,s,f): return f'<c r="{ref}" s="{s}"><f>{html.escape(f,quote=False)}</f></c>'
+    def ncell(ref,s,v): return f'<c r="{ref}" s="{s}"><v>{v}</v></c>'
+    c={}
+    c['S3']=tcell('S3','218',SALES_MARK+' (NAMA YANG SAMA DIGABUNG)')
+    hdr=[('S','250','SALES'),('W','251','TOTAL OMSET'),('X','251','GROSS PROFIT'),('Y','250','NAMA DI ACCURATE')]
+    for col_,st_,t in hdr: c[f'{col_}5']=tcell(f'{col_}5',st_,t)
+    for col_,m in zip('TUV',(7,8,9)): c[f'{col_}5']=ncell(f'{col_}5','254',m)
+    r=6
+    for name,al in SALES_GROUPS:
+        arr='{'+','.join('"'+a+'"' for a in al)+'}'
+        c[f'S{r}']=tcell(f'S{r}','255',name)
+        for col_ in 'TUV':
+            c[f'{col_}{r}']=fcell(f'{col_}{r}','11',f'SUM(SUMIFS({AN},{AP},{arr},{AS},{col_}$5))')
+        c[f'W{r}']=fcell(f'W{r}','16',f'SUM(T{r}:V{r})')
+        c[f'X{r}']=fcell(f'X{r}','11',f'SUM(SUMIFS({AT},{AP},{arr}))')
+        c[f'Y{r}']=tcell(f'Y{r}','258',', '.join(al))
+        r+=1
+    c[f'S{r}']=tcell(f'S{r}','256','TOTAL')
+    for col_ in 'TUVWX': c[f'{col_}{r}']=fcell(f'{col_}{r}','16',f'SUM({col_}6:{col_}{r-1})')
+    c[f'S{r+1}']=tcell(f'S{r+1}','258','Header bulan (7, 8, 9) bisa diganti untuk kuartal berikutnya. Pivot & tabel per cabang tetap memakai nama asli Accurate.')
+    x=set_cells(x,c)
+    cols='<col min="19" max="19" width="24" customWidth="1"/><col min="20" max="24" width="15" customWidth="1"/><col min="25" max="25" width="60" customWidth="1"/>'
+    if '<cols>' in x and 'min="19"' not in x: x=x.replace('</cols>',cols+'</cols>',1)
+    x=re.sub(r'<dimension ref="[^"]*"/>','<dimension ref="B3:Y40"/>',x,1)
+    return x, True
+
 def sheet_paths(z):
     wb=z.read('xl/workbook.xml').decode('utf8'); rels=z.read('xl/_rels/workbook.xml.rels').decode('utf8')
     rid={m.group(1):m.group(2) for m in re.finditer(r'<Relationship [^>]*?Id="([^"]+)"[^>]*?Target="([^"]+)"',rels)}
@@ -157,6 +232,9 @@ def build(dash, data, out):
         x2,n=re.subn(r'(<c r="C4"[^>]*>)<v>[^<]*</v>(</c>)',rf'\g<1><v>{serial}</v>\g<2>',x,1)
         if n: rep[p]=x2; print(f'  Scoreboard C4 (TANGGAL) = {maxd.date()}')
         else: print('PERINGATAN: Scoreboard!C4 bukan angka biasa, tidak diubah')
+    if 'Mark.Corporate' in sp:
+        p=sp['Mark.Corporate']; x,added_sales=add_sales_table(rep.get(p) or zin.read(p).decode('utf8'))
+        if added_sales: rep[p]=x; print('  Mark.Corporate: tabel Rekap per Sales ditambahkan (S3:Y22)')
     wbx=zin.read('xl/workbook.xml').decode('utf8')
     wbx=re.sub(r'<calcPr([^>]*?)\s*fullCalcOnLoad="1"','<calcPr\\1',wbx)
     wbx=re.sub(r'<calcPr([^>]*?)/>',r'<calcPr\1 fullCalcOnLoad="1"/>',wbx,1)
