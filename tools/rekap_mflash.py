@@ -11,6 +11,11 @@ CABANG = {'001':'KLENDER','002':'CEGER','003':'BINTARA','004':'RADJIMAN','005':'
           '013':'KARAWANG','014':'JATIWARINGIN','015':'CIKAMPEK','016':'CILANGKAP','017':'PEJATEN','018':'CIBUBUR'}
 PILAR = ['SERVICE','PENJUALAN RITEL','PENGADAAN CORPORATE','MAINTENANCE CORPORATE','CICILAN SYARIAH','SEWA']
 PILAR_SHEET = 'Omset Kategori Pilar'
+# Urutan kolom data di sheet Faktur Penjualan (B, D, F, ..., AR)
+DASH_COLS = ['TGL FAKTUR','NO FAKTUR','KATEGORI PELANGGAN','ID PELANGGAN','NAMA CUSTOMER','NAMA ADMIN',
+             'KATEGORI PENJUALAN','KATEGORI BARANG','NAMA TEKNISI','NAMA TEKNISI (FINAL)','YANG MENYERAHKAN/MENJUAL',
+             'KERUSAKAN UTAMA','MERK UNIT','TIPE UNIT','KODE BARANG','NAMA BARANG','HARGA BELI','QTY','@HARGA',
+             'TOTAL HARGA','NAMA DEFAULT PENJUAL PELANGGAN FAKTUR PENJUALAN','KATEGORI PILAR']
 EPOCH = datetime.datetime(1899,12,30)
 RECALC = '/mnt/skills/public/xlsx/scripts/recalc.py'
 
@@ -39,17 +44,29 @@ def read_branches(files):
         if code in seen: sys.exit(f'Kode cabang {code} dobel')
         seen.add(code)
         ws=openpyxl.load_workbook(f,read_only=True).active; ws.reset_dimensions()
-        rows=list(ws.iter_rows(values_only=True)); hdr=rows[0]
-        assert hdr[1]=='TGL FAKTUR' and hdr[3]=='NO FAKTUR' and hdr[39]=='TOTAL HARGA' and hdr[33]=='HARGA BELI', (f,hdr)
-        pil_ok = len(hdr)>43 and hdr[43] and 'PILAR' in str(hdr[43]).upper()
+        rows=list(ws.iter_rows(values_only=True)); hdr=[str(h).strip().upper() if h is not None else None for h in rows[0]]
+        # Petakan kolom berdasarkan NAMA header -> bisa baca format omset (ada kolom
+        # pemisah) maupun format walk-in (tanpa pemisah, + kolom Nomor/Tanggal
+        # Pengiriman Pesanan). Isi kedua export sama (dicek 1 Okt 2026).
+        pos={}
+        for i,h in enumerate(hdr):
+            if h is None: continue
+            key='KATEGORI PILAR' if h.startswith('KATEGORI PILAR') else h
+            pos.setdefault(key,i)
+        missing_cols=[c for c in DASH_COLS if c not in pos and c!='KATEGORI PILAR']
+        if missing_cols: sys.exit(f'Kolom tidak ditemukan di {f}: {missing_cols}')
         rs=[r for r in rows[1:] if any(v is not None for v in r)]
+        out_rows=[]
         for r in rs:
-            r=list(r)+[None]*(44-len(r)); r=r[:44]; r[0]=CABANG[code]
-            if not pil_ok: r[43]=None
-            if not isinstance(r[1],datetime.datetime): sys.exit(f'Tanggal tidak valid di {f}: {r[1]!r}')
-            data.append(r)
-        ds=[r[1] for r in rs]
-        summary.append((code,CABANG[code],len(rs),min(ds).date(),max(ds).date(),sum((r[39] or 0) for r in rs)))
+            o=[None]*44; o[0]=CABANG[code]
+            for k,cname in enumerate(DASH_COLS):
+                i=pos.get(cname)
+                o[1+2*k]=r[i] if i is not None and i<len(r) else None
+            if not isinstance(o[1],datetime.datetime): sys.exit(f'Tanggal tidak valid di {f}: {o[1]!r}')
+            out_rows.append(o)
+        data.extend(out_rows)
+        ds=[r[1] for r in out_rows]
+        summary.append((code,CABANG[code],len(out_rows),min(ds).date(),max(ds).date(),sum((r[39] or 0) for r in out_rows)))
     missing=set(CABANG)-seen
     return data,summary,missing
 
@@ -106,6 +123,40 @@ def build(dash, data, out):
         x2,n=re.subn(r'(<c r="C6"[^>]*>)<v>[^<]*</v>(</c>)',rf'\g<1><v>{day}</v>\g<2>',x,1)
         if n: rep[p]=x2
         else: print('PERINGATAN: Data Periode!C6 bukan angka biasa, tidak diubah')
+    sst_now=sst
+    def _sst_txt(i):
+        m=re.findall(r'<si>(.*?)</si>',sst_now,flags=re.S)
+        return re.sub('<[^>]+>','',m[int(i)]) if int(i)<len(m) else ''
+    if 'Detail Data Penjualan' in sp:
+        p=sp['Detail Data Penjualan']; x=zin.read(p).decode('utf8')
+        sis_all=re.findall(r'<si>(.*?)</si>',sst_now,flags=re.S)
+        tot_cols=[c for c,v in re.findall(r'<c r="([A-Z]+)8"[^>]*?t="s"[^>]*><v>(\d+)</v>',x)
+                  if re.sub('<[^>]+>','',sis_all[int(v)]).strip().upper()=='TOTAL']
+        nfix=0
+        for tc in tot_cols:
+            ti=cidx(tc); first=col(ti-18); last=col(ti-1)
+            # total harian (baris 9..100) & total target (baris 6) = SUM 18 cabang
+            def fx(m):
+                nonlocal nfix
+                r=m.group(2); nfix+=1
+                return f'{m.group(1)}SUM({first}{r}:{last}{r})</f>'
+            x=re.sub(r'(<c r="%s(?:[6-9]|\d\d+)"[^>]*><f[^>]*>)SUM\(\$?[A-Z]+\$?(\d+):\$?[A-Z]+\$?\2\)</f>'%tc, fx, x)
+        # Target Pejaten & Cibubur (baris 6) sempat menunjuk sel Expected Value
+        # Cikampek/Cilangkap (E23/E24 dst) -> arahkan ke baris Pejaten/Cibubur.
+        tfix={'T6':('Scoreboard!E23','Scoreboard!C25'),'U6':('Scoreboard!E24','Scoreboard!C26'),
+              'AO6':('Scoreboard!E48','Scoreboard!C50'),'AP6':('Scoreboard!E49','Scoreboard!C51'),
+              'BK6':('Scoreboard!E73','Scoreboard!C75'),'BL6':('Scoreboard!E74','Scoreboard!C76')}
+        nt=0
+        for cell,(old,new) in tfix.items():
+            x,k=re.subn(r'(<c r="%s"[^>]*><f>)%s(</f>)'%(cell,re.escape(old)),rf'\g<1>{new}\g<2>',x); nt+=k
+        rep[p]=x
+        print(f'  Detail Data Penjualan: {nfix} rumus TOTAL diset ke 18 cabang ({", ".join(tot_cols)}); {nt} rumus target Pejaten/Cibubur diperbaiki')
+    if 'Scoreboard' in sp:
+        p=sp['Scoreboard']; x=zin.read(p).decode('utf8')
+        serial=(maxd-EPOCH).days
+        x2,n=re.subn(r'(<c r="C4"[^>]*>)<v>[^<]*</v>(</c>)',rf'\g<1><v>{serial}</v>\g<2>',x,1)
+        if n: rep[p]=x2; print(f'  Scoreboard C4 (TANGGAL) = {maxd.date()}')
+        else: print('PERINGATAN: Scoreboard!C4 bukan angka biasa, tidak diubah')
     wbx=zin.read('xl/workbook.xml').decode('utf8')
     wbx=re.sub(r'<calcPr([^>]*?)\s*fullCalcOnLoad="1"','<calcPr\\1',wbx)
     wbx=re.sub(r'<calcPr([^>]*?)/>',r'<calcPr\1 fullCalcOnLoad="1"/>',wbx,1)
