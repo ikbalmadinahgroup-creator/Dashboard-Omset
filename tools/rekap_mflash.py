@@ -233,7 +233,11 @@ def build(dash, data, out):
     row1=rows[1]; row2=rows[2]
     sty={}
     for m in re.finditer(r'<c r="([A-Z]+)2"(?: s="(\d+)")?',row2): sty[m.group(1)]=m.group(2) or '0'
-    N=len(data); end=max(75000,N+1)
+    N=len(data)
+    # Timpa SEMUA baris data lama (termasuk kalau data lama lebih panjang dari data baru);
+    # hanya baris sentinel jauh di bawah (>= 1.000.000) yang dipertahankan.
+    old_last=max([k for k in rows if k<1000000] or [1])
+    end=max(75000,N+1,old_last)
     if N+1>95212: print('PERINGATAN: data melebihi baris 95212 (range SUMIFS Detail Data Penjualan)!')
     sst=zin.read('xl/sharedStrings.xml').decode('utf8')
     sis=re.findall(r'<si>(.*?)</si>',sst,flags=re.S); smap={}
