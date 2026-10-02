@@ -148,6 +148,36 @@ def rebuild_omset_bulanan(x, qs, maxd):
     x=re.sub(r'<selection [^>]*/>','<selection activeCell="B4" sqref="B4"/>',x,1)
     return x
 
+def wrap_getpivot(formula):
+    """Bungkus setiap GETPIVOTDATA(...) dengan IFERROR(...,0) (kurung di dalam
+    string nama spt "WAHYU JP (RADJIMAN)" diabaikan). Lewati yang sudah dibungkus
+    atau yang menunjuk pivot #REF!."""
+    out=''; i=0; n=0
+    while True:
+        j=formula.find('GETPIVOTDATA(',i)
+        if j<0: out+=formula[i:]; break
+        k=j+len('GETPIVOTDATA('); depth=1; inq=False
+        while k<len(formula) and depth:
+            ch=formula[k]
+            if ch=='"': inq=not inq
+            elif not inq and ch=='(': depth+=1
+            elif not inq and ch==')': depth-=1
+            k+=1
+        call=formula[j:k]
+        if formula[max(0,j-8):j]=='IFERROR(' or '#REF!' in call: out+=formula[i:k]
+        else: out+=formula[i:j]+f'IFERROR({call},0)'; n+=1
+        i=k
+    return out,n
+
+def wrap_getpivot_sheet(x):
+    tot=0
+    def fx(m):
+        nonlocal tot
+        body=html.unescape(m.group(2)); nb,n=wrap_getpivot(body); tot+=n
+        return m.group(1)+html.escape(nb,quote=False)+m.group(3)
+    x=re.sub(r'(<f(?: [^>]*)?>)([^<]*GETPIVOTDATA[^<]*)(</f>)',fx,x)
+    return x,tot
+
 def sheet_paths(z):
     wb=z.read('xl/workbook.xml').decode('utf8'); rels=z.read('xl/_rels/workbook.xml.rels').decode('utf8')
     rid={m.group(1):m.group(2) for m in re.finditer(r'<Relationship [^>]*?Id="([^"]+)"[^>]*?Target="([^"]+)"',rels)}
@@ -272,20 +302,44 @@ def build(dash, data, out):
         nt=0
         for cell,(old,new) in tfix.items():
             x,k=re.subn(r'(<c r="%s"[^>]*><f>)%s(</f>)'%(cell,re.escape(old)),rf'\g<1>{new}\g<2>',x); nt+=k
+        # Tanggal baris 9..100 (kolom C) = tanggal kuartal berjalan (92 hari maks)
+        qd=0
+        for i in range(92):
+            rr=9+i; dser=(qs+datetime.timedelta(days=i)-EPOCH).days
+            x,k=re.subn(r'(<c r="C%d"[^>]*>)<v>[^<]*</v>(</c>)'%rr,rf'\g<1><v>{dser}</v>\g<2>',x,1); qd+=k
+        print(f'  Detail Data Penjualan: tanggal C9:C100 diset mulai {qs:%d %b %Y} ({qd} sel)')
         rep[p]=x
         print(f'  Detail Data Penjualan: {nfix} rumus TOTAL diset ke 18 cabang ({", ".join(tot_cols)}); {nt} rumus target Pejaten/Cibubur diperbaiki')
     if 'Scoreboard' in sp:
         p=sp['Scoreboard']; x=zin.read(p).decode('utf8')
         serial=(maxd-EPOCH).days
         x2,n=re.subn(r'(<c r="C4"[^>]*>)<v>[^<]*</v>(</c>)',rf'\g<1><v>{serial}</v>\g<2>',x,1)
-        if n: rep[p]=x2; print(f'  Scoreboard C4 (TANGGAL) = {maxd.date()}')
+        if n:
+            x2=re.sub(r'(<c r="C6"[^>]*>)<f>DAY\(C4\)\+31\+31</f>',r"\g<1><f>'Data Periode'!$C$6</f>",x2,1)
+            rep[p]=x2; print(f'  Scoreboard C4 (TANGGAL) = {maxd.date()}')
         else: print('PERINGATAN: Scoreboard!C4 bukan angka biasa, tidak diubah')
+    if 'Scoreboard' in sp:
+        p=sp['Scoreboard']; x,ng=wrap_getpivot_sheet(rep.get(p) or zin.read(p).decode('utf8'))
+        if ng: rep[p]=x; print(f'  Scoreboard: {ng} GETPIVOTDATA dibungkus IFERROR(...,0)')
     if 'Omset Bulanan' in sp:
         p=sp['Omset Bulanan']; rep[p]=rebuild_omset_bulanan(zin.read(p).decode('utf8'),qs,maxd)
         print(f'  Omset Bulanan: dibangun ulang {qs:%b}..{maxd:%b %Y} (18 cabang, per tanggal + total bulan)')
+    months=[qs.month,qs.month+1,qs.month+2]
+    def set_month_hdr(x,cells):
+        for ref,mv in zip(cells,months):
+            x=re.sub(r'(<c r="%s"[^>]*>)<v>[^<]*</v>(</c>)'%ref,rf'\g<1><v>{mv}</v>\g<2>',x,1)
+        return x
     if 'Mark.Corporate' in sp:
         p=sp['Mark.Corporate']; x,added_sales=add_sales_table(rep.get(p) or zin.read(p).decode('utf8'))
-        if added_sales: rep[p]=x; print('  Mark.Corporate: tabel Rekap per Sales ditambahkan (S3:Y22)')
+        if added_sales: print('  Mark.Corporate: tabel Rekap per Sales ditambahkan (S3:Y22)')
+        # GETPIVOTDATA untuk sales yang belum ada transaksinya -> #REF! (merembet ke
+        # Scoreboard/Dashboard). Bungkus IFERROR(...,0).
+        x,ng=wrap_getpivot_sheet(x)
+        if ng: print(f'  Mark.Corporate: {ng} GETPIVOTDATA dibungkus IFERROR(...,0)')
+        rep[p]=set_month_hdr(x,['T5','U5','V5'])
+    if PILAR_SHEET in sp:
+        p=sp[PILAR_SHEET]; rep[p]=set_month_hdr(rep.get(p) or zin.read(p).decode('utf8'),['C30','D30','E30'])
+    print(f'  Header bulan (Omset Kategori Pilar C30:E30, Rekap per Sales T5:V5) = {months}')
     wbx=zin.read('xl/workbook.xml').decode('utf8')
     wbx=re.sub(r'<calcPr([^>]*?)\s*fullCalcOnLoad="1"','<calcPr\\1',wbx)
     wbx=re.sub(r'<calcPr([^>]*?)/>',r'<calcPr\1 fullCalcOnLoad="1"/>',wbx,1)
