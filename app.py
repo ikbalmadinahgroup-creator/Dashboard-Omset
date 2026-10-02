@@ -1370,7 +1370,9 @@ def load_all_walkin_data() -> pd.DataFrame:
         return pd.DataFrame()
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.dropna(subset=["Cabang", "Tanggal"])
-    combined = combined.drop_duplicates(subset=["Cabang", "NomorPengiriman"])
+    # DO yang sama tapi tanggalnya beda (muncul lagi di export kuartal berikutnya)
+    # = kunjungan baru -> dihitung per (Cabang, Nomor, Tanggal).
+    combined = combined.drop_duplicates(subset=["Cabang", "NomorPengiriman", "Tanggal"])
     _save_cached_combined(WALKIN_DATA_DIR, "walkin_combined", combined, schema_version=WALKIN_SCHEMA_VERSION)
     return combined
 
