@@ -2321,6 +2321,15 @@ def make_corporate_template() -> bytes:
 
 
 SCOREBOARD_KATEGORI = ["Omset All", "Service", "Gadget & Aksesoris"]
+# Scoreboard tambahan per KATEGORI PILAR (sama dengan tabel di sheet Scoreboard
+# Excel baris 156 dst). Target dikosongkan dulu sampai user mengirim angka target.
+SCOREBOARD_PILAR = {
+    "Pengadaan Corporate": "Pengadaan",
+    "Maintenance Corporate": "Maintenance",
+    "Sewa": "Sewa",
+    "ISP": "Internet Provider",
+}
+SCOREBOARD_KATEGORI_SEMUA = SCOREBOARD_KATEGORI + list(SCOREBOARD_PILAR)
 
 
 def load_target_data(path: str):
@@ -2451,6 +2460,10 @@ def pencapaian_color(pct):
 def _kategori_filter(df_main: pd.DataFrame, kategori: str) -> pd.DataFrame:
     if kategori == "Omset All":
         return df_main
+    if kategori in SCOREBOARD_PILAR:
+        if "PilarExcel" not in df_main.columns:
+            return df_main.iloc[0:0]
+        return df_main[df_main["PilarExcel"] == SCOREBOARD_PILAR[kategori]]
     return df_main[df_main["Kategori"] == kategori]
 
 
@@ -3575,7 +3588,7 @@ quarter_period_label_full = (
 )
 
 scoreboards = {}
-for kategori in SCOREBOARD_KATEGORI:
+for kategori in SCOREBOARD_KATEGORI_SEMUA:
     sb = build_scoreboard(df_main, target_map, tanggal_acuan, selected_branches, kategori)
     scoreboards[kategori] = _finalize_scoreboard(sb)
 
@@ -3639,7 +3652,7 @@ with tab1:
         st.caption("✅ " + target_period_caption(tanggal_acuan))
 
     st.markdown("<br/>", unsafe_allow_html=True)
-    kategori_pilih_progress = st.selectbox("Kategori untuk grafik progres", SCOREBOARD_KATEGORI, key="progress_kategori")
+    kategori_pilih_progress = st.selectbox("Kategori untuk grafik progres", SCOREBOARD_KATEGORI_SEMUA, key="progress_kategori")
     df_progress = build_daily_progress(df_main, target_map, tanggal_acuan, selected_branches, kategori_pilih_progress)
     st.plotly_chart(render_daily_progress_chart(df_progress), use_container_width=True, key="chart_daily_progress")
 
@@ -3673,7 +3686,7 @@ with tab1:
 
 with tab2:
     st.subheader(f"🏆 Scoreboard — {quarter_period_label}")
-    scoreboard_kategori_pilih = st.selectbox("Kategori", SCOREBOARD_KATEGORI, key="scoreboard_kategori")
+    scoreboard_kategori_pilih = st.selectbox("Kategori", SCOREBOARD_KATEGORI_SEMUA, key="scoreboard_kategori")
     sb_display = scoreboards.get(scoreboard_kategori_pilih, pd.DataFrame())
     if not _has_target_data:
         st.caption("⚠️ Belum ada Target Omset - kolom % PENCAPAIAN akan menampilkan '-' sampai Target di-upload. " + target_period_caption(tanggal_acuan))
@@ -3701,10 +3714,16 @@ with tab2:
         mask = (log_df["Tanggal"].apply(lambda d: d.year if d else None) == hist_tahun) & \
                (log_df["Tanggal"].apply(lambda d: d.month if d else None) == hist_bulan) & \
                (log_df["Cabang"].isin(hist_cabang))
-        if scoreboard_kategori_pilih != "Omset All":
-            mask = mask & (log_df["Kategori"] == scoreboard_kategori_pilih)
-        hist_filtered = log_df[mask]
-        daily_hist = hist_filtered.groupby("Tanggal")["Omset"].sum().reset_index().sort_values("Tanggal") if not hist_filtered.empty else pd.DataFrame(columns=["Tanggal", "Omset"])
+        if scoreboard_kategori_pilih in SCOREBOARD_PILAR:
+            # Ledger tidak menyimpan pilar -> hitung langsung dari data omset.
+            daily_hist = build_daily_history(df_main, hist_cabang, scoreboard_kategori_pilih)
+            if not daily_hist.empty:
+                daily_hist = daily_hist[daily_hist["Tanggal"].apply(lambda d: d.year == hist_tahun and d.month == hist_bulan)]
+        else:
+            if scoreboard_kategori_pilih != "Omset All":
+                mask = mask & (log_df["Kategori"] == scoreboard_kategori_pilih)
+            hist_filtered = log_df[mask]
+            daily_hist = hist_filtered.groupby("Tanggal")["Omset"].sum().reset_index().sort_values("Tanggal") if not hist_filtered.empty else pd.DataFrame(columns=["Tanggal", "Omset"])
         st.plotly_chart(render_daily_history_chart(daily_hist), use_container_width=True, key="chart_daily_history")
     else:
         st.caption("Belum ada riwayat tersimpan.")
