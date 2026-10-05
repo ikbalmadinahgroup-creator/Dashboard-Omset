@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rekap faktur penjualan 18 cabang MFlash ke Dashboard 6 Pilar (XML surgery, tanpa openpyxl full-load).
+"""Rekap faktur penjualan semua cabang MFlash ke Dashboard 6 Pilar (XML surgery, tanpa openpyxl full-load).
 Usage: python3 rekap_mflash.py --dashboard DASH.xlsx --out OUT.xlsx --workdir DIR BRANCH1.xlsx BRANCH2.xlsx ...
 """
 import argparse, zipfile, re, html, datetime, os, sys, time, shutil, subprocess, signal, warnings, collections
@@ -8,7 +8,8 @@ warnings.filterwarnings('ignore')
 
 CABANG = {'001':'KLENDER','002':'CEGER','003':'BINTARA','004':'RADJIMAN','005':'JATIMULYA','006':'DRAMAGA',
           '007':'CONDET','008':'JATIBENING','009':'SAWANGAN','010':'WARBONG','011':'CINERE','012':'CIBINONG',
-          '013':'KARAWANG','014':'JATIWARINGIN','015':'CIKAMPEK','016':'CILANGKAP','017':'PEJATEN','018':'CIBUBUR'}
+          '013':'KARAWANG','014':'JATIWARINGIN','015':'CIKAMPEK','016':'CILANGKAP','017':'PEJATEN','018':'CIBUBUR',
+          '019':'CIMANGGIS'}
 PILAR = ['SERVICE','PENJUALAN RITEL','PENGADAAN CORPORATE','MAINTENANCE CORPORATE','CICILAN SYARIAH','SEWA']
 PILAR_SHEET = 'Omset Kategori Pilar'
 # Urutan kolom data di sheet Faktur Penjualan (B, D, F, ..., AR)
@@ -289,10 +290,15 @@ def build(dash, data, out):
         sis_all=re.findall(r'<si>(.*?)</si>',sst_now,flags=re.S)
         tot_cols=[c for c,v in re.findall(r'<c r="([A-Z]+)8"[^>]*?t="s"[^>]*><v>(\d+)</v>',x)
                   if re.sub('<[^>]+>','',sis_all[int(v)]).strip().upper()=='TOTAL']
+        # Kolom cabang pertama tiap blok = header KLENDER terdekat di kiri kolom TOTAL;
+        # TOTAL = SUM(KLENDER .. kolom sebelum TOTAL) -> otomatis ikut cabang baru (mis. CIMANGGIS).
+        kl_cols=[cidx(c) for c,v in re.findall(r'<c r="([A-Z]+)8"[^>]*?t="s"[^>]*><v>(\d+)</v>',x)
+                 if re.sub('<[^>]+>','',sis_all[int(v)]).strip().upper()=='KLENDER']
         nfix=0
         for tc in tot_cols:
-            ti=cidx(tc); first=col(ti-18); last=col(ti-1)
-            # total harian (baris 9..100) & total target (baris 6) = SUM 18 cabang
+            ti=cidx(tc); kl=[k for k in kl_cols if k<ti]
+            first=col(max(kl)) if kl else col(ti-len(CABANG)); last=col(ti-1)
+            # total harian (baris 9..100) & total target (baris 6) = SUM semua cabang
             def fx(m):
                 nonlocal nfix
                 r=m.group(2); nfix+=1
@@ -313,7 +319,7 @@ def build(dash, data, out):
             x,k=re.subn(r'(<c r="C%d"[^>]*>)<v>[^<]*</v>(</c>)'%rr,rf'\g<1><v>{dser}</v>\g<2>',x,1); qd+=k
         print(f'  Detail Data Penjualan: tanggal C9:C100 diset mulai {qs:%d %b %Y} ({qd} sel)')
         rep[p]=x
-        print(f'  Detail Data Penjualan: {nfix} rumus TOTAL diset ke 18 cabang ({", ".join(tot_cols)}); {nt} rumus target Pejaten/Cibubur diperbaiki')
+        print(f'  Detail Data Penjualan: {nfix} rumus TOTAL diset ke semua cabang ({", ".join(tot_cols)}); {nt} rumus target Pejaten/Cibubur diperbaiki')
     if 'Scoreboard' in sp:
         p=sp['Scoreboard']; x=zin.read(p).decode('utf8')
         serial=(maxd-EPOCH).days
@@ -327,7 +333,7 @@ def build(dash, data, out):
         if ng: rep[p]=x; print(f'  Scoreboard: {ng} GETPIVOTDATA dibungkus IFERROR(...,0)')
     if 'Omset Bulanan' in sp:
         p=sp['Omset Bulanan']; rep[p]=rebuild_omset_bulanan(zin.read(p).decode('utf8'),qs,maxd)
-        print(f'  Omset Bulanan: dibangun ulang {qs:%b}..{maxd:%b %Y} (18 cabang, per tanggal + total bulan)')
+        print(f'  Omset Bulanan: dibangun ulang {qs:%b}..{maxd:%b %Y} ({len(CABANG)} cabang, per tanggal + total bulan)')
     months=[qs.month,qs.month+1,qs.month+2]
     def set_month_hdr(x,cells):
         for ref,mv in zip(cells,months):
@@ -397,10 +403,11 @@ def add_pilar_sheet(zin,wbx,rels,ct):
         r=6+k; put(f'B{r}',LBL,c)
         for j in range(6): put(f'{cols[j]}{r}',NUM,f=f'SUMIFS({AN},{A},$B{r},{AR},{cols[j]}$5,{AS},{crit})')
         put(f'I{r}',NUM,f=f'J{r}-SUM(C{r}:H{r})'); put(f'J{r}',NUMT,f=f'SUMIFS({AN},{A},$B{r},{AS},{crit})')
-    put('B24',LBLT,'TOTAL')
-    for c in cols: put(f'{c}24',NUMT,f=f'SUM({c}6:{c}23)')
-    put('B25',LBL,'% KONTRIBUSI')
-    for c in cols: put(f'{c}25',PCTT if c=='J' else PCT,f=f'IF($J$24=0,0,{c}24/$J$24)')
+    TR=6+len(CAB)   # baris TOTAL (19 cabang -> 25), maks 21 cabang sebelum tabel bulanan (baris 28)
+    put(f'B{TR}',LBLT,'TOTAL')
+    for c in cols: put(f'{c}{TR}',NUMT,f=f'SUM({c}6:{c}{TR-1})')
+    put(f'B{TR+1}',LBL,'% KONTRIBUSI')
+    for c in cols: put(f'{c}{TR+1}',PCTT if c=='J' else PCT,f=f'IF($J${TR}=0,0,{c}{TR}/$J${TR})')
     put('B28',TITLE,'OMSET KATEGORI PILAR PER BULAN (ALL CABANG)')
     put('B29',NOTE,'Angka bulan di header (7, 8, 9) bisa diganti untuk periode berikutnya.')
     put('B30',H,'KATEGORI PILAR')
