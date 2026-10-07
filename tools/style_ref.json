@@ -1,0 +1,162 @@
+{
+"245": {
+"numFmtId": "17",
+"numFmt": null,
+"font": "<font><b/><sz val=\"18\"/><color rgb=\"FFFFFFFF\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF548235\"/><bgColor rgb=\"FF000000\"/></patternFill></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"87": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"14\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFFFC000\"/><bgColor rgb=\"FF000000\"/></patternFill></fill>",
+"border": "<border><left style=\"thin\"><color indexed=\"64\"/></left><right style=\"thin\"><color indexed=\"64\"/></right><top style=\"thin\"><color indexed=\"64\"/></top><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"88": {
+"numFmtId": "14",
+"numFmt": null,
+"font": "<font><b/><sz val=\"14\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFFFC000\"/><bgColor rgb=\"FF000000\"/></patternFill></fill>",
+"border": "<border><left/><right style=\"thin\"><color indexed=\"64\"/></right><top style=\"thin\"><color indexed=\"64\"/></top><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"89": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"14\"/><color rgb=\"FFFFFFFF\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF0070C0\"/><bgColor rgb=\"FF000000\"/></patternFill></fill>",
+"border": "<border><left/><right style=\"thin\"><color indexed=\"64\"/></right><top style=\"thin\"><color indexed=\"64\"/></top><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"91": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><sz val=\"12\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left style=\"thin\"><color indexed=\"64\"/></left><right style=\"thin\"><color indexed=\"64\"/></right><top/><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\"/>"
+},
+"92": {
+"numFmtId": "14",
+"numFmt": null,
+"font": "<font><sz val=\"12\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left/><right style=\"thin\"><color indexed=\"64\"/></right><top/><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\"/>"
+},
+"93": {
+"numFmtId": "166",
+"numFmt": "_-[$Rp-421]* #,##0_-;\\-[$Rp-421]* #,##0_-;_-[$Rp-421]* &quot;-&quot;_-;_-@_-",
+"font": "<font><sz val=\"12\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left/><right style=\"thin\"><color indexed=\"64\"/></right><top/><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": ""
+},
+"94": {
+"numFmtId": "166",
+"numFmt": "_-[$Rp-421]* #,##0_-;\\-[$Rp-421]* #,##0_-;_-[$Rp-421]* &quot;-&quot;_-;_-@_-",
+"font": "<font><b/><sz val=\"12\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left/><right style=\"thin\"><color indexed=\"64\"/></right><top/><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": ""
+},
+"248": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"12\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFF8CBAD\"/><bgColor rgb=\"FF000000\"/></patternFill></fill>",
+"border": "<border><left style=\"thin\"><color indexed=\"64\"/></left><right/><top style=\"thin\"><color indexed=\"64\"/></top><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"249": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"12\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFF8CBAD\"/><bgColor rgb=\"FF000000\"/></patternFill></fill>",
+"border": "<border><left/><right/><top style=\"thin\"><color indexed=\"64\"/></top><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"95": {
+"numFmtId": "166",
+"numFmt": "_-[$Rp-421]* #,##0_-;\\-[$Rp-421]* #,##0_-;_-[$Rp-421]* &quot;-&quot;_-;_-@_-",
+"font": "<font><b/><sz val=\"12\"/><color rgb=\"FF000000\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFF8CBAD\"/><bgColor rgb=\"FF000000\"/></patternFill></fill>",
+"border": "<border><left/><right/><top/><bottom style=\"thin\"><color indexed=\"64\"/></bottom><diagonal/></border>",
+"inner": "<alignment vertical=\"center\"/>"
+},
+"218": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"18\"/><color theme=\"3\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"250": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"12\"/><color theme=\"0\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor theme=\"3\"/><bgColor indexed=\"64\"/></patternFill></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/>"
+},
+"251": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"12\"/><color theme=\"0\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor theme=\"5\"/><bgColor indexed=\"64\"/></patternFill></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/>"
+},
+"254": {
+"numFmtId": "200",
+"numFmt": "&quot;BULAN &quot;0",
+"font": "<font><b/><sz val=\"12\"/><color theme=\"0\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor theme=\"3\"/><bgColor indexed=\"64\"/></patternFill></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"255": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><sz val=\"12\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"left\" vertical=\"center\"/>"
+},
+"256": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><b/><sz val=\"12\"/><color theme=\"0\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor theme=\"5\"/><bgColor indexed=\"64\"/></patternFill></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"left\" vertical=\"center\"/>"
+},
+"258": {
+"numFmtId": "0",
+"numFmt": null,
+"font": "<font><sz val=\"12\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"left\" vertical=\"center\"/>"
+},
+"11": {
+"numFmtId": "3",
+"numFmt": "#,##0",
+"font": "<font><sz val=\"12\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"none\"/></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+},
+"16": {
+"numFmtId": "3",
+"numFmt": "#,##0",
+"font": "<font><b/><sz val=\"12\"/><color theme=\"0\"/><name val=\"Calibri\"/><family val=\"2\"/><scheme val=\"minor\"/></font>",
+"fill": "<fill><patternFill patternType=\"solid\"><fgColor theme=\"5\"/><bgColor indexed=\"64\"/></patternFill></fill>",
+"border": "<border><left/><right/><top/><bottom/><diagonal/></border>",
+"inner": "<alignment horizontal=\"center\" vertical=\"center\"/>"
+}
+}

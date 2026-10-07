@@ -4,6 +4,8 @@ Usage: python3 rekap_mflash.py --dashboard DASH.xlsx --out OUT.xlsx --workdir DI
 """
 import argparse, zipfile, re, html, datetime, os, sys, time, shutil, subprocess, signal, warnings, collections
 import openpyxl
+sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
+from style_tools import ensure_styles, remap_sheet
 warnings.filterwarnings('ignore')
 
 CABANG = {'001':'KLENDER','002':'CEGER','003':'BINTARA','004':'RADJIMAN','005':'JATIMULYA','006':'DRAMAGA',
@@ -12,6 +14,7 @@ CABANG = {'001':'KLENDER','002':'CEGER','003':'BINTARA','004':'RADJIMAN','005':'
           '019':'CIMANGGIS'}
 PILAR = ['SERVICE','PENJUALAN RITEL','PENGADAAN CORPORATE','MAINTENANCE CORPORATE','CICILAN SYARIAH','SEWA']
 PILAR_SHEET = 'Omset Kategori Pilar'
+STYLE_IDS = [245,87,88,89,91,92,93,94,248,249,95,218,250,251,254,255,256,258,11,16]
 # Urutan kolom data di sheet Faktur Penjualan (B, D, F, ..., AR)
 DASH_COLS = ['TGL FAKTUR','NO FAKTUR','KATEGORI PELANGGAN','ID PELANGGAN','NAMA CUSTOMER','NAMA ADMIN',
              'KATEGORI PENJUALAN','KATEGORI BARANG','NAMA TEKNISI','NAMA TEKNISI (FINAL)','YANG MENYERAHKAN/MENJUAL',
@@ -72,7 +75,9 @@ def set_cells(xml, cells):
     return xml[:a]+nb+xml[b:]
 
 def add_sales_table(x, sst_lookup=None):
-    if SALES_MARK in x: return x, False
+    # Selalu ditulis ulang (idempoten): setelah file disimpan Excel, teks berubah jadi
+    # shared string & id gaya di-renumber, jadi deteksi teks tidak bisa diandalkan.
+    existed = SALES_MARK in x
     FP="'Faktur Penjualan'!"; AN,AP,AS,AT=[f"{FP}${c}$2:${c}$95212" for c in ('AN','AP','AS','AT')]
     def tcell(ref,s,t): return f'<c r="{ref}" s="{s}" t="inlineStr"><is><t xml:space="preserve">{html.escape(t,quote=False)}</t></is></c>'
     def fcell(ref,s,f): return f'<c r="{ref}" s="{s}"><f>{html.escape(f,quote=False)}</f></c>'
@@ -99,7 +104,7 @@ def add_sales_table(x, sst_lookup=None):
     cols='<col min="19" max="19" width="24" customWidth="1"/><col min="20" max="24" width="15" customWidth="1"/><col min="25" max="25" width="60" customWidth="1"/>'
     if '<cols>' in x and 'min="19"' not in x: x=x.replace('</cols>',cols+'</cols>',1)
     x=re.sub(r'<dimension ref="[^"]*"/>','<dimension ref="B3:Y40"/>',x,1)
-    return x, True
+    return x, not existed
 
 # ---------- Sheet "Omset Bulanan" (dibangun ulang tiap rekap) ----------
 BULAN_NAMA={1:'JANUARI',2:'FEBRUARI',3:'MARET',4:'APRIL',5:'MEI',6:'JUNI',7:'JULI',8:'AGUSTUS',9:'SEPTEMBER',10:'OKTOBER',11:'NOVEMBER',12:'DESEMBER'}
@@ -349,6 +354,34 @@ def build(dash, data, out):
         rep[p]=set_month_hdr(x,['T5','U5','V5'])
     if PILAR_SHEET in sp:
         p=sp[PILAR_SHEET]; rep[p]=set_month_hdr(rep.get(p) or zin.read(p).decode('utf8'),['C30','D30','E30'])
+    # Id gaya hardcode (dari file asli) -> id gaya yang setara di workbook ini
+    # (Excel me-renumber gaya saat file disimpan ulang; id di luar jangkauan = file 'repair').
+    st_now=rep.get('xl/styles.xml') or zin.read('xl/styles.xml').decode('utf8')
+    st_new,smap=ensure_styles(st_now,STYLE_IDS)
+    if st_new!=st_now: rep['xl/styles.xml']=st_new
+    for nm in ('Omset Bulanan','Mark.Corporate'):
+        if nm in sp and sp[nm] in rep:
+            x=rep[sp[nm]]
+            if nm=='Mark.Corporate':
+                nrow=6+len(SALES_GROUPS)+1
+                def _rs(m):
+                    c_,r_,sv=m.group(2),int(m.group(3)),int(m.group(4))
+                    if 19<=cidx(c_)<=25 and 3<=r_<=nrow: sv=smap.get(sv,sv)
+                    return f'{m.group(1)}s="{sv}"'
+                x=re.sub(r'(<c r="([A-Z]+)(\d+)"[^>]*?\s)s="(\d+)"',_rs,x)
+            else:
+                x=remap_sheet(x,smap)
+            rep[sp[nm]]=x
+    # <col max> tidak boleh > 16384 (kolom XFD) -> kalau lebih, Excel 'repair' file
+    for nm,pth in sp.items():
+        if nm=='Faktur Penjualan': continue
+        x=rep.get(pth) or zin.read(pth).decode('utf8')
+        def _cl(m):
+            mn,mx=int(m.group(2)),int(m.group(3))
+            if mn>16384: return ''
+            return m.group(1)+f'min="{mn}" max="{min(mx,16384)}"'+m.group(4)
+        x2=re.sub(r'(<col )min="(\d+)" max="(\d+)"([^>]*/>)',_cl,x)
+        if x2!=x: rep[pth]=x2; print(f'  {nm}: lebar kolom > XFD dirapikan')
     print(f'  Header bulan (Omset Kategori Pilar C30:E30, Rekap per Sales T5:V5) = {months}')
     wbx=zin.read('xl/workbook.xml').decode('utf8')
     wbx=re.sub(r'<calcPr([^>]*?)\s*fullCalcOnLoad="1"','<calcPr\\1',wbx)
