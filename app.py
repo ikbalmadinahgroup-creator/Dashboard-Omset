@@ -2983,6 +2983,77 @@ def render_mc_person_table_html(df_person: pd.DataFrame) -> str:
     </tr></thead><tbody>{rows_html}</tbody></table>"""
 
 
+def extract_mc_target_scoreboard(path: str) -> dict:
+    """Baca tabel SCOREBOARD OMSET MARKETING CORPORATE & GROSS PROFIT MARKETING
+    CORPORATE dari sheet Scoreboard (nilai hasil hitung Excel): per nama marketing
+    -> Target, Expected Value, S/D Hari Ini, % Pencapaian, Kejar Target/hari.
+    Return {"Omset": df, "Gross Profit": df} (baris N/A diabaikan)."""
+    out = {}
+    try:
+        raw = pd.read_excel(path, sheet_name="Scoreboard", header=None)
+    except Exception:
+        return out
+    def num(v):
+        f = _to_float_or_none(v)
+        return float(f) if f is not None else 0.0
+    for key, word in (("Omset", "SCOREBOARD OMSET MARKETING CORPORATE"), ("Gross Profit", "GROSS PROFIT")):
+        title = None
+        for i in range(len(raw)):
+            vals = [str(_nan_to_none(v) or "").upper() for v in raw.iloc[i, :15]]
+            if any(word in v and "MARKETING CORPORATE" in v for v in vals):
+                title = i
+                break
+        if title is None:
+            continue
+        rows = []
+        for i in range(title + 5, min(title + 45, len(raw))):
+            nama = str(_nan_to_none(raw.iat[i, 1]) or "").strip()
+            if not nama:
+                continue
+            is_total = nama.upper() == "HEAD OF CORPORATE"
+            if nama.upper() in ("N/A", "-") and not is_total:
+                continue
+            rows.append({
+                "Nama": "TOTAL (HEAD OF CORPORATE)" if is_total else nama,
+                "Target": num(raw.iat[i, 2]), "ExpectedValue": num(raw.iat[i, 4]),
+                "SdHariIni": num(raw.iat[i, 5]), "Pct": num(raw.iat[i, 7]),
+                "Kejar": num(raw.iat[i, 10]),
+            })
+            if is_total:
+                break
+        if rows:
+            out[key] = pd.DataFrame(rows)
+    return out
+
+
+def render_mc_target_table_html(df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return "<p style='color:#6b7280;'>Belum ada data.</p>"
+    th = "padding:6px 10px;border:1px solid #e5e7eb;"
+    body = ""
+    for _, r in df.iterrows():
+        tot = r["Nama"].startswith("TOTAL")
+        pct = r["Pct"] if r["Target"] else None
+        color = pencapaian_color(pct)
+        bg = "background:#f3f4f6;font-weight:700;" if tot else ""
+        pct_txt = f"{pct*100:.1f}%" if pct is not None else "-"
+        body += (f'<tr style="{bg}"><td style="{th}">{r["Nama"]}</td>'
+                 f'<td style="{th}text-align:right;">{format_rupiah(r["Target"])}</td>'
+                 f'<td style="{th}text-align:right;">{format_rupiah(r["ExpectedValue"])}</td>'
+                 f'<td style="{th}text-align:right;">{format_rupiah(r["SdHariIni"])}</td>'
+                 f'<td style="{th}text-align:center;color:white;background:{color};font-weight:700;">{pct_txt}</td>'
+                 f'<td style="{th}text-align:right;">{format_rupiah(r["Kejar"])}</td></tr>')
+    return (f'<table style="width:100%;border-collapse:collapse;font-size:0.88em;"><thead><tr style="background:#0f766e;color:white;">'
+            f'<th style="{th}text-align:left;">Marketing</th><th style="{th}">Target Q</th><th style="{th}">Expected Value</th>'
+            f'<th style="{th}">S/D Hari Ini</th><th style="{th}">% Pencapaian</th><th style="{th}">Kejar Target / Hari</th>'
+            f'</tr></thead><tbody>{body}</tbody></table>')
+
+
+@st.cache_data(show_spinner=False)
+def _cached_mc_target_scoreboard(path: str, mtime: float) -> dict:
+    return extract_mc_target_scoreboard(path)
+
+
 def render_retail_by_branch_table_html(df_branch: pd.DataFrame) -> str:
     if df_branch.empty:
         return "<p style='color:#6b7280;'>Belum ada data Retail.</p>"
@@ -3555,6 +3626,15 @@ if not _has_target_data and not df_main.empty:
         except Exception:
             continue
 
+mc_target_sb = {}
+for _fn in sorted(os.listdir(MAIN_DATA_DIR)) if os.path.isdir(MAIN_DATA_DIR) else []:
+    _fp = os.path.join(MAIN_DATA_DIR, _fn)
+    try:
+        if _fn.lower().endswith((".xlsx", ".xlsm")) and _detect_main_file_kind(_fp) == "master":
+            mc_target_sb = _cached_mc_target_scoreboard(_fp, os.path.getmtime(_fp)) or mc_target_sb
+    except Exception:
+        continue
+
 df_corp = pd.DataFrame()
 corp_files = sorted(os.listdir(CORP_DATA_DIR)) if os.path.isdir(CORP_DATA_DIR) else []
 if corp_files:
@@ -4085,6 +4165,14 @@ with tab6:
         fig_mc2 = render_mc_split_donut(mc_summary)
         if fig_mc2:
             st.plotly_chart(fig_mc2, use_container_width=True, key="chart_mc_split_tab6")
+
+        if mc_target_sb:
+            for _k in ("Omset", "Gross Profit"):
+                if _k in mc_target_sb:
+                    st.markdown(f"###### 🎯 Scoreboard {_k} Marketing Corporate (Target vs Pencapaian)")
+                    st.markdown(render_mc_target_table_html(mc_target_sb[_k]), unsafe_allow_html=True)
+                    st.markdown("<br/>", unsafe_allow_html=True)
+            st.caption("Sumber: sheet Scoreboard di Dashboard 6 Pilar (nama marketing & target Q dari Excel, pencapaian dihitung dari data faktur).")
 
         st.markdown("###### Detail Marketing Corporate per Sales")
         st.markdown(render_mc_person_table_html(mc_person_table), unsafe_allow_html=True)

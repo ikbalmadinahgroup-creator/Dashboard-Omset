@@ -6,6 +6,7 @@ import argparse, zipfile, re, html, datetime, os, sys, time, shutil, subprocess,
 import openpyxl
 sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
 from style_tools import ensure_styles, remap_sheet
+import mc_scoreboard
 warnings.filterwarnings('ignore')
 
 CABANG = {'001':'KLENDER','002':'CEGER','003':'BINTARA','004':'RADJIMAN','005':'JATIMULYA','006':'DRAMAGA',
@@ -336,6 +337,11 @@ def build(dash, data, out):
     if 'Scoreboard' in sp:
         p=sp['Scoreboard']; x,ng=wrap_getpivot_sheet(rep.get(p) or zin.read(p).decode('utf8'))
         if ng: rep[p]=x; print(f'  Scoreboard: {ng} GETPIVOTDATA dibungkus IFERROR(...,0)')
+        # Marketing Corporate & GP: pencapaian per nama marketing (SUMIFS ke Faktur, bukan pivot)
+        x,mcinfo=mc_scoreboard.fill(rep.get(p) or zin.read(p).decode('utf8'),sst_now,set_cells)
+        if mcinfo:
+            rep[p]=x
+            print('  Scoreboard Marketing Corporate: '+'; '.join(f"{lab}={'/'.join(al) if al else '-'}" for k,r,lab,al in mcinfo if k=='omset'))
     if 'Omset Bulanan' in sp:
         p=sp['Omset Bulanan']; rep[p]=rebuild_omset_bulanan(zin.read(p).decode('utf8'),qs,maxd)
         print(f'  Omset Bulanan: dibangun ulang {qs:%b}..{maxd:%b %Y} ({len(CABANG)} cabang, per tanggal + total bulan)')
