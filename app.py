@@ -2360,7 +2360,10 @@ def load_target_data(path: str):
         up = c.strip().upper()
         if "TARGET" not in up:
             continue
-        if "SERVICE" in up:
+        pilar_hit = next((k for k in SCOREBOARD_PILAR if k.upper() in up), None)
+        if pilar_hit:
+            wide_col_map[c] = pilar_hit
+        elif "SERVICE" in up:
             wide_col_map[c] = "Service"
         elif "GADGET" in up or "AKSESORIS" in up or "ACCESSORIES" in up:
             wide_col_map[c] = "Gadget & Aksesoris"
