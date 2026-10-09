@@ -337,6 +337,18 @@ def build(dash, data, out):
     if 'Scoreboard' in sp:
         p=sp['Scoreboard']; x,ng=wrap_getpivot_sheet(rep.get(p) or zin.read(p).decode('utf8'))
         if ng: rep[p]=x; print(f'  Scoreboard: {ng} GETPIVOTDATA dibungkus IFERROR(...,0)')
+        # Tabel Omset Pengadaan Marketing Corporate (sekali tambah, format = tabel Omset MC)
+        drw=None
+        relp=p.replace('worksheets/','worksheets/_rels/')+'.rels'
+        if relp in zin.namelist():
+            mm=re.search(r'Target="\.\./drawings/(drawing\d+\.xml)"',zin.read(relp).decode('utf8'))
+            if mm: drw='xl/drawings/'+mm.group(1)
+        dx=(rep.get(drw) or zin.read(drw).decode('utf8')) if drw else None
+        x,dx2,addp=mc_scoreboard.ensure_pengadaan_block(rep.get(p) or zin.read(p).decode('utf8'),sst_now,dx)
+        if addp:
+            rep[p]=x
+            if drw: rep[drw]=dx2
+            print('  Scoreboard: tabel OMSET PENGADAAN MARKETING CORPORATE ditambahkan')
         # Marketing Corporate & GP: pencapaian per nama marketing (SUMIFS ke Faktur, bukan pivot)
         x,mcinfo=mc_scoreboard.fill(rep.get(p) or zin.read(p).decode('utf8'),sst_now,set_cells)
         if mcinfo:

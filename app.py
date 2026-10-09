@@ -2999,11 +2999,12 @@ def extract_mc_target_scoreboard(path: str) -> dict:
     def num(v):
         f = _to_float_or_none(v)
         return float(f) if f is not None else 0.0
-    for key, word in (("Omset", "SCOREBOARD OMSET MARKETING CORPORATE"), ("Gross Profit", "GROSS PROFIT")):
+    for key, word, excl in (("Omset", "SCOREBOARD OMSET MARKETING CORPORATE", None), ("Gross Profit", "GROSS PROFIT", None),
+                            ("Omset Pengadaan", "PENGADAAN MARKETING CORPORATE", None)):
         title = None
         for i in range(len(raw)):
             vals = [str(_nan_to_none(v) or "").upper() for v in raw.iloc[i, :15]]
-            if any(word in v and "MARKETING CORPORATE" in v for v in vals):
+            if any(word in v and "MARKETING CORPORATE" in v and (excl is None or excl not in v) for v in vals):
                 title = i
                 break
         if title is None:
@@ -4170,7 +4171,7 @@ with tab6:
             st.plotly_chart(fig_mc2, use_container_width=True, key="chart_mc_split_tab6")
 
         if mc_target_sb:
-            for _k in ("Omset", "Gross Profit"):
+            for _k in ("Omset", "Gross Profit", "Omset Pengadaan"):
                 if _k in mc_target_sb:
                     st.markdown(f"###### 🎯 Scoreboard {_k} Marketing Corporate (Target vs Pencapaian)")
                     st.markdown(render_mc_target_table_html(mc_target_sb[_k]), unsafe_allow_html=True)
