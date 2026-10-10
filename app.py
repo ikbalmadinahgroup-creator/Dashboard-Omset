@@ -91,6 +91,16 @@ def _gh_headers():
     return {"Authorization": f"Bearer {_GH_TOKEN}", "Accept": "application/vnd.github+json"}
 
 
+def _gh_get(url, **kw):
+    """GET ke GitHub API. Kalau token kadaluarsa/tidak valid (401), coba lagi
+    TANPA token - repo Dashboard-Omset publik, jadi data tetap bisa dibaca
+    (sinkron data dari GitHub tetap jalan); hanya backup/upload yang butuh token."""
+    r = requests.get(url, headers=_gh_headers(), **kw)
+    if r.status_code == 401:
+        r = requests.get(url, headers={"Accept": "application/vnd.github+json"}, **kw)
+    return r
+
+
 def github_upload_file(path: str, content_bytes: bytes, message: str = None):
     if not _GH_ENABLED:
         return False
@@ -140,7 +150,7 @@ def github_download_file(path: str, local_path: str):
     token, repo, branch = _gh_config()
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     try:
-        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
+        r = _gh_get(url, params={"ref": branch}, timeout=15)
         if r.status_code == 200:
             content = base64.b64decode(r.json()["content"])
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -156,7 +166,7 @@ def github_list_dir(path: str):
     token, repo, branch = _gh_config()
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     try:
-        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
+        r = _gh_get(url, params={"ref": branch}, timeout=15)
         if r.status_code == 200:
             return [item["name"] for item in r.json() if item["type"] == "file"]
     except Exception:
@@ -170,7 +180,7 @@ def github_list_dir_meta(path: str):
     token, repo, branch = _gh_config()
     url = f"https://api.github.com/repos/{repo}/contents/{path}"
     try:
-        r = requests.get(url, headers=_gh_headers(), params={"ref": branch}, timeout=15)
+        r = _gh_get(url, params={"ref": branch}, timeout=15)
         if r.status_code == 200:
             return True, {item["name"]: item.get("size") for item in r.json() if item["type"] == "file"}
         if r.status_code == 404:
