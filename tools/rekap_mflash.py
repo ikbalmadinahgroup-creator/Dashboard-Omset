@@ -36,7 +36,7 @@ def cidx(c): return sum((ord(ch)-64)*26**i for i,ch in enumerate(reversed(c)))
 # tabel ini menjumlahkan per orang.
 SALES_GROUPS = [
     ('WAHYU JP', ['WAHYU JP','WAHYU JP (RADJIMAN)','WAHYU JP JATIWARINGIN']),
-    ('DICKY YUNIAWAN', ['DICKY YUNIAWAN']),
+    ('DICKY YUNIAWAN', ['DICKY YUNIAWAN','DICKY']),
     ('FAISAL ABDUL RAHMAN', ['FAISAL ABDUL RAHMAN']),
     ('IQBAL SABARI', ['IQBAL SABARI','IQBAL SABARI SALES','IKBAL SABARI']),
     ('KOUTSAREZRA KANZA', ['KOUTSAREZRA KANZA']),
@@ -85,9 +85,13 @@ def add_sales_table(x, sst_lookup=None):
     def ncell(ref,s,v): return f'<c r="{ref}" s="{s}"><v>{v}</v></c>'
     c={}
     c['S3']=tcell('S3','218',SALES_MARK+' (NAMA YANG SAMA DIGABUNG)')
-    hdr=[('S','250','SALES'),('W','251','TOTAL OMSET'),('X','251','GROSS PROFIT'),('Y','250','NAMA DI ACCURATE')]
+    # Baris 4: judul kelompok; baris 5: header. Omset per bulan T:V + total W,
+    # Gross Profit per bulan X:Z + total AA, nama Accurate AB.
+    c['T4']=tcell('T4','251','OMSET'); c['X4']=tcell('X4','251','GROSS PROFIT')
+    hdr=[('S','250','SALES'),('W','251','TOTAL OMSET'),('AA','251','TOTAL GROSS PROFIT'),('AB','250','NAMA DI ACCURATE')]
     for col_,st_,t in hdr: c[f'{col_}5']=tcell(f'{col_}5',st_,t)
     for col_,m in zip('TUV',(7,8,9)): c[f'{col_}5']=ncell(f'{col_}5','254',m)
+    for col_,m in zip('XYZ',(7,8,9)): c[f'{col_}5']=ncell(f'{col_}5','254',m)
     r=6
     for name,al in SALES_GROUPS:
         arr='{'+','.join('"'+a+'"' for a in al)+'}'
@@ -95,26 +99,28 @@ def add_sales_table(x, sst_lookup=None):
         for col_ in 'TUV':
             c[f'{col_}{r}']=fcell(f'{col_}{r}','11',f'SUM(SUMIFS({AN},{AP},{arr},{AS},{col_}$5))')
         c[f'W{r}']=fcell(f'W{r}','16',f'SUM(T{r}:V{r})')
-        c[f'X{r}']=fcell(f'X{r}','11',f'SUM(SUMIFS({AT},{AP},{arr}))')
-        c[f'Y{r}']=tcell(f'Y{r}','258',', '.join(al))
+        for col_ in 'XYZ':
+            c[f'{col_}{r}']=fcell(f'{col_}{r}','11',f'SUM(SUMIFS({AT},{AP},{arr},{AS},{col_}$5))')
+        c[f'AA{r}']=fcell(f'AA{r}','16',f'SUM(X{r}:Z{r})')
+        c[f'AB{r}']=tcell(f'AB{r}','258',', '.join(al))
         r+=1
     c[f'S{r}']=tcell(f'S{r}','256','TOTAL')
-    for col_ in 'TUVWX': c[f'{col_}{r}']=fcell(f'{col_}{r}','16',f'SUM({col_}6:{col_}{r-1})')
-    c[f'S{r+1}']=tcell(f'S{r+1}','258','Header bulan (7, 8, 9) bisa diganti untuk kuartal berikutnya. Pivot & tabel per cabang tetap memakai nama asli Accurate.')
+    for col_ in ['T','U','V','W','X','Y','Z','AA']: c[f'{col_}{r}']=fcell(f'{col_}{r}','16',f'SUM({col_}6:{col_}{r-1})')
+    c[f'S{r+1}']=tcell(f'S{r+1}','258','Header bulan (angka bulan di baris 5) otomatis mengikuti kuartal. Pivot & tabel per cabang tetap memakai nama asli Accurate.')
     x=set_cells(x,c)
-    cols='<col min="19" max="19" width="24" customWidth="1"/><col min="20" max="24" width="15" customWidth="1"/><col min="25" max="25" width="60" customWidth="1"/>'
+    cols='<col min="19" max="19" width="24" customWidth="1"/><col min="20" max="27" width="15" customWidth="1"/><col min="28" max="28" width="60" customWidth="1"/>'
     m_=re.search(r'<cols>(.*?)</cols>',x,re.S)
     if m_:
         # sisipkan lebar kolom S..Y (19..25) dengan urutan benar; potong entri lama yang bertumpuk
         keep=[]
         for c_ in re.findall(r'<col [^>]*/>',m_.group(1)):
             mn=int(re.search(r'min="(\d+)"',c_).group(1)); mx=int(re.search(r'max="(\d+)"',c_).group(1))
-            if mx<19 or mn>25: keep.append((mn,c_)); continue
+            if mx<19 or mn>28: keep.append((mn,c_)); continue
             if mn<19: keep.append((mn,re.sub(r'max="\d+"','max="18"',c_)))
-            if mx>25: keep.append((26,re.sub(r'min="\d+"','min="26"',c_)))
+            if mx>28: keep.append((29,re.sub(r'min="\d+"','min="29"',c_)))
         for c_ in re.findall(r'<col [^>]*/>',cols): keep.append((int(re.search(r'min="(\d+)"',c_).group(1)),c_))
         x=x[:m_.start()]+'<cols>'+''.join(c_ for _,c_ in sorted(keep,key=lambda t:t[0]))+'</cols>'+x[m_.end():]
-    x=re.sub(r'<dimension ref="[^"]*"/>','<dimension ref="B3:Y40"/>',x,1)
+    x=re.sub(r'<dimension ref="[^"]*"/>','<dimension ref="B3:AB40"/>',x,1)
     return x, not existed
 
 # ---------- Sheet "Omset Bulanan" (dibangun ulang tiap rekap) ----------
@@ -379,7 +385,7 @@ def build(dash, data, out):
         # Scoreboard/Dashboard). Bungkus IFERROR(...,0).
         x,ng=wrap_getpivot_sheet(x)
         if ng: print(f'  Mark.Corporate: {ng} GETPIVOTDATA dibungkus IFERROR(...,0)')
-        rep[p]=set_month_hdr(x,['T5','U5','V5'])
+        rep[p]=set_month_hdr(set_month_hdr(x,['T5','U5','V5']),['X5','Y5','Z5'])
     if PILAR_SHEET in sp:
         p=sp[PILAR_SHEET]; rep[p]=set_month_hdr(rep.get(p) or zin.read(p).decode('utf8'),['C30','D30','E30'])
     # Id gaya hardcode (dari file asli) -> id gaya yang setara di workbook ini
@@ -394,7 +400,7 @@ def build(dash, data, out):
                 nrow=6+len(SALES_GROUPS)+1
                 def _rs(m):
                     c_,r_,sv=m.group(2),int(m.group(3)),int(m.group(4))
-                    if 19<=cidx(c_)<=25 and 3<=r_<=nrow: sv=smap.get(sv,sv)
+                    if 19<=cidx(c_)<=28 and 3<=r_<=nrow: sv=smap.get(sv,sv)
                     return f'{m.group(1)}s="{sv}"'
                 x=re.sub(r'(<c r="([A-Z]+)(\d+)"[^>]*?\s)s="(\d+)"',_rs,x)
             else:
