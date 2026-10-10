@@ -103,7 +103,17 @@ def add_sales_table(x, sst_lookup=None):
     c[f'S{r+1}']=tcell(f'S{r+1}','258','Header bulan (7, 8, 9) bisa diganti untuk kuartal berikutnya. Pivot & tabel per cabang tetap memakai nama asli Accurate.')
     x=set_cells(x,c)
     cols='<col min="19" max="19" width="24" customWidth="1"/><col min="20" max="24" width="15" customWidth="1"/><col min="25" max="25" width="60" customWidth="1"/>'
-    if '<cols>' in x and 'min="19"' not in x: x=x.replace('</cols>',cols+'</cols>',1)
+    m_=re.search(r'<cols>(.*?)</cols>',x,re.S)
+    if m_:
+        # sisipkan lebar kolom S..Y (19..25) dengan urutan benar; potong entri lama yang bertumpuk
+        keep=[]
+        for c_ in re.findall(r'<col [^>]*/>',m_.group(1)):
+            mn=int(re.search(r'min="(\d+)"',c_).group(1)); mx=int(re.search(r'max="(\d+)"',c_).group(1))
+            if mx<19 or mn>25: keep.append((mn,c_)); continue
+            if mn<19: keep.append((mn,re.sub(r'max="\d+"','max="18"',c_)))
+            if mx>25: keep.append((26,re.sub(r'min="\d+"','min="26"',c_)))
+        for c_ in re.findall(r'<col [^>]*/>',cols): keep.append((int(re.search(r'min="(\d+)"',c_).group(1)),c_))
+        x=x[:m_.start()]+'<cols>'+''.join(c_ for _,c_ in sorted(keep,key=lambda t:t[0]))+'</cols>'+x[m_.end():]
     x=re.sub(r'<dimension ref="[^"]*"/>','<dimension ref="B3:Y40"/>',x,1)
     return x, not existed
 
