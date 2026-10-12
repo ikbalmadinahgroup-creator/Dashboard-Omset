@@ -3064,6 +3064,17 @@ def render_mc_target_table_html(df: pd.DataFrame) -> str:
 
 
 @st.cache_data(show_spinner=False)
+def _cached_scoreboard_share_files(path: str, mtime: float) -> dict:
+    """Gambar Scoreboard format Excel (untuk dibagikan ke cabang): {nama: jpg bytes} + PDF gabungan."""
+    import scoreboard_export as _se
+    logo = os.path.join(os.path.dirname(os.path.abspath(globals().get("__file__", "app.py"))), "logo.png")
+    imgs = _se.build_images(path, logo)
+    out = {k: _se.to_jpg(v) for k, v in imgs.items()}
+    out["__pdf__"] = _se.to_pdf(list(imgs.values()))
+    return out
+
+
+@st.cache_data(show_spinner=False)
 def _cached_mc_target_scoreboard(path: str, mtime: float) -> dict:
     return extract_mc_target_scoreboard(path)
 
@@ -3641,10 +3652,12 @@ if not _has_target_data and not df_main.empty:
             continue
 
 mc_target_sb = {}
+master_xlsx_path = None
 for _fn in sorted(os.listdir(MAIN_DATA_DIR)) if os.path.isdir(MAIN_DATA_DIR) else []:
     _fp = os.path.join(MAIN_DATA_DIR, _fn)
     try:
         if _fn.lower().endswith((".xlsx", ".xlsm")) and _detect_main_file_kind(_fp) == "master":
+            master_xlsx_path = _fp
             mc_target_sb = _cached_mc_target_scoreboard(_fp, os.path.getmtime(_fp)) or mc_target_sb
     except Exception:
         continue
@@ -3780,6 +3793,31 @@ with tab1:
 
 with tab2:
     st.subheader(f"🏆 Scoreboard — {quarter_period_label}")
+    with st.container(border=True):
+        st.markdown("###### 📥 Download Scoreboard (format Excel, siap share ke cabang)")
+        if master_xlsx_path:
+            try:
+                _share = _cached_scoreboard_share_files(master_xlsx_path, os.path.getmtime(master_xlsx_path))
+                _tgl_share = re.search(r"(\d{2}[A-Za-z]{3}\d{4})", os.path.basename(master_xlsx_path))
+                _sfx = _tgl_share.group(1) if _tgl_share else date.today().strftime("%d%b%Y")
+                _keys = [k for k in _share if k != "__pdf__"]
+                _cols = st.columns(len(_keys) + 1)
+                for _i, _k in enumerate(_keys):
+                    with _cols[_i]:
+                        st.download_button(f"🖼️ {_k}", data=_share[_k], mime="image/jpeg",
+                                           file_name=f"Scoreboard_{sanitize_filename(_k.split(' (')[0])}_{_sfx}.jpg",
+                                           key=f"dl_share_{_i}", use_container_width=True)
+                with _cols[-1]:
+                    st.download_button("📄 Semua (PDF)", data=_share["__pdf__"], mime="application/pdf",
+                                       file_name=f"Scoreboard_MFlash_{_sfx}.pdf", key="dl_share_pdf",
+                                       use_container_width=True)
+                st.caption("Gambar dibuat otomatis dari sheet Scoreboard di Dashboard 6 Pilar terbaru "
+                           f"({os.path.basename(master_xlsx_path)}) — tampilannya sama dengan Excel.")
+            except Exception as _e:
+                st.warning(f"Gambar Scoreboard belum bisa dibuat: {_e}")
+        else:
+            st.caption("Belum ada file Dashboard 6 Pilar di data/main.")
+
     scoreboard_kategori_pilih = st.selectbox("Kategori", SCOREBOARD_KATEGORI_SEMUA, key="scoreboard_kategori")
     sb_display = scoreboards.get(scoreboard_kategori_pilih, pd.DataFrame())
     if not _has_target_data:
