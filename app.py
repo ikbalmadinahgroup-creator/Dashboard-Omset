@@ -1443,6 +1443,20 @@ def aggregate_walkin_monthly_split(df: pd.DataFrame, tanggal_acuan: date) -> pd.
             return (effective_acuan - month_start_b).days + 1
         return tanggal_acuan.day
     g["Hari"] = g["Bulan"].apply(_hari)
+    # Cabang baru (data pertama muncul di tengah bulan): hari dihitung sejak data pertama,
+    # konsisten dengan Excel (MINIFS tanggal mulai).
+    first_all = df.groupby("Cabang")["Tanggal"].min()
+    def _adj(row):
+        f = first_all.get(row["Cabang"])
+        if f is None or pd.isna(f):
+            return row["Hari"]
+        if hasattr(f, "date") and not isinstance(f, date):
+            f = f.date()
+        b = int(row["Bulan"])
+        if f.year == tanggal_acuan.year and f.month == b and f.day > 1:
+            return max(int(row["Hari"]) - (f.day - 1), 1)
+        return row["Hari"]
+    g["Hari"] = g.apply(_adj, axis=1)
     g["RataRataPerHari"] = g["Total"] / g["Hari"]
     return g
 
