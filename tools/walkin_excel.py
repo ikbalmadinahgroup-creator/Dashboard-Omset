@@ -33,12 +33,12 @@ cabs=[c for c in CAB.values() if c not in missing]
 cnt={s:df[df.src==s].groupby(['tgl','cab']).size() for s in ('DO','LANGSUNG')}
 
 # ---------- styles ----------
-AR='Arial'
-fT=Font(name=AR,bold=True,size=14,color='0F766E'); fH=Font(name=AR,bold=True,color='FFFFFF',size=10)
-fB=Font(name=AR,size=10); fBb=Font(name=AR,size=10,bold=True); fIn=Font(name=AR,size=10,color='0000FF'); fNote=Font(name=AR,size=9,italic=True,color='6B7280')
-pH=PatternFill('solid',fgColor='0F766E'); pT=PatternFill('solid',fgColor='134E4A'); pSum=PatternFill('solid',fgColor='E6F4F1'); pIn=PatternFill('solid',fgColor='FFF2CC')
+AR='Calibri'
+fT=Font(name=AR,bold=True,size=14,color='000000'); fH=Font(name=AR,bold=True,color='000000',size=11)
+fB=Font(name=AR,size=11); fBb=Font(name=AR,size=11,bold=True); fIn=Font(name=AR,size=11,color='0000FF'); fNote=Font(name=AR,size=10,italic=True,color='595959')
+pH=PatternFill('solid',fgColor='C6E0B4'); pT=PatternFill('solid',fgColor='A9D08E'); pSum=PatternFill('solid',fgColor='E2EFDA'); pIn=PatternFill('solid',fgColor='FFFF00')
 C=Alignment(horizontal='center',vertical='center',wrap_text=True); Lw=Alignment(horizontal='left',vertical='top',wrap_text=True)
-thin=Side(style='thin',color='D1D5DB'); BR=Border(left=thin,right=thin,top=thin,bottom=thin)
+thin=Side(style='thin',color='A6A6A6'); BR=Border(left=thin,right=thin,top=thin,bottom=thin)
 N0='#,##0;-#,##0;"-"'; N1='#,##0;-#,##0;0'  # rata-rata: bilangan bulat (dibulatkan ke atas)
 
 wb=Workbook()
