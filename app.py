@@ -3538,6 +3538,7 @@ if _GH_OK:
 else:
     st.sidebar.error(f"⚠️ Backup GitHub TIDAK AKTIF\n\n{_GH_MSG}")
 
+st.sidebar.caption("Versi app: 28 Okt 2026 — walk-in Cimanggis mulai 17 Okt")
 st.sidebar.markdown("## 📂 Upload Data")
 
 with st.sidebar.expander("📊 Data Omset (Faktur Penjualan)", expanded=False):
