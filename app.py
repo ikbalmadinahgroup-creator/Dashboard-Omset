@@ -1374,6 +1374,19 @@ def _apply_branch_open(df: pd.DataFrame) -> pd.DataFrame:
     return df[keep]
 
 
+def _walkin_branch_starts(df: pd.DataFrame) -> dict:
+    """Tanggal mulai dihitung per cabang: tanggal buka (WALKIN_BRANCH_OPEN) atau
+    tanggal data pertama cabang (untuk cabang baru tanpa tanggal buka tercatat)."""
+    out = {}
+    if not df.empty and "Cabang" in df.columns:
+        for cab, t in df.groupby("Cabang")["Tanggal"].min().items():
+            if hasattr(t, "date") and not isinstance(t, date):
+                t = t.date()
+            out[cab] = t
+    out.update(WALKIN_BRANCH_OPEN)
+    return out
+
+
 def load_all_walkin_data() -> pd.DataFrame:
     return _apply_branch_open(_load_all_walkin_data_raw())
 
@@ -1531,7 +1544,16 @@ def aggregate_walkin_current_period(df: pd.DataFrame, tanggal_acuan: date) -> pd
     else:
         g["TotalWalkinBulanIni"] = 0
     g["TotalWalkinBulanIni"] = g["TotalWalkinBulanIni"].fillna(0)
-    g["RataRataPerHari"] = g["TotalWalkinBulanIni"] / hari_berjalan_bulan if hari_berjalan_bulan else 0.0
+    # Cabang baru (buka di tengah bulan): hari dihitung sejak tanggal buka.
+    _starts = _walkin_branch_starts(df)
+    def _hari_cab(cab):
+        st0 = _starts.get(cab)
+        if st0 is not None and st0 > month_start and effective_acuan >= st0:
+            return (effective_acuan - st0).days + 1
+        return hari_berjalan_bulan
+    g["_hari"] = g["Cabang"].apply(_hari_cab)
+    g["RataRataPerHari"] = g.apply(lambda r: r["TotalWalkinBulanIni"] / r["_hari"] if r["_hari"] else 0.0, axis=1)
+    g = g.drop(columns=["_hari"])
     g = g.drop(columns=["TotalWalkinBulanIni"])
     return g
 
@@ -1576,6 +1598,17 @@ def aggregate_walkin_weekly_current_month(df: pd.DataFrame, tanggal_acuan: date)
     g = sub.groupby(["Cabang", "Minggu"])["NomorPengiriman"].nunique().reset_index()
     g.columns = ["Cabang", "Minggu", "Total"]
     g["Hari"] = g["Minggu"].apply(lambda m: _hari_in_week(int(m), tanggal_acuan, effective_acuan))
+    _starts = _walkin_branch_starts(df)
+    def _adj_week(r):
+        st0 = _starts.get(r["Cabang"])
+        h = int(r["Hari"])
+        if st0 is None or st0 <= month_start or st0.month != month_start.month or st0.year != month_start.year:
+            return h
+        ws = (int(r["Minggu"]) - 1) * 7 + 1
+        if st0.day > ws:
+            h = max(h - (st0.day - ws), 0)
+        return h
+    g["Hari"] = g.apply(_adj_week, axis=1)
     g["RataRataPerHari"] = g.apply(lambda r: (r["Total"] / r["Hari"]) if r["Hari"] else 0.0, axis=1)
     return g
 
