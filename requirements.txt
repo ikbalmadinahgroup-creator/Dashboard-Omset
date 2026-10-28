@@ -8,3 +8,4 @@ Pillow>=10.0
 requests>=2.31
 matplotlib>=3.7
 pyarrow>=14.0
+# rebuild 2026-10-28
