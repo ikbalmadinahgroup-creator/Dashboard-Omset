@@ -28,6 +28,9 @@ df=pd.DataFrame(recs,columns=['cab','tgl','src','st','kat','kec'])
 last=df.tgl.max(); qm=3*((last.month-1)//3)+1
 qs=pd.Timestamp(last.year,qm,1); qe=(qs+pd.DateOffset(months=3))-pd.Timedelta(days=1)
 df=df[(df.tgl>=qs)&(df.tgl<=last)]
+# cabang baru: hanya dihitung mulai tanggal buka toko
+BUKA={'CIMANGGIS':pd.Timestamp(2026,10,17)}
+for _cb,_d0 in BUKA.items(): df=df[~((df.cab==_cb)&(df.tgl<_d0))]
 dates=pd.date_range(qs,qe); months=[qm,qm+1,qm+2]
 cabs=[c for c in CAB.values() if c not in missing]
 cnt={s:df[df.src==s].groupby(['tgl','cab']).size() for s in ('DO','LANGSUNG')}

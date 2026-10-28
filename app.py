@@ -1359,7 +1359,26 @@ def _load_walkin_data_cached(path: str, mtime: float, size: int) -> pd.DataFrame
     return load_walkin_data(path)
 
 
+# Tanggal buka cabang baru: walk-in sebelum tanggal ini tidak dihitung,
+# dan rata-rata per hari dihitung mulai tanggal ini.
+WALKIN_BRANCH_OPEN = {"CIMANGGIS": date(2026, 10, 17)}
+
+
+def _apply_branch_open(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "Cabang" not in df.columns:
+        return df
+    keep = pd.Series(True, index=df.index)
+    for cab, d0 in WALKIN_BRANCH_OPEN.items():
+        tg = pd.to_datetime(df["Tanggal"]).dt.date
+        keep &= ~((df["Cabang"] == cab) & (tg < d0))
+    return df[keep]
+
+
 def load_all_walkin_data() -> pd.DataFrame:
+    return _apply_branch_open(_load_all_walkin_data_raw())
+
+
+def _load_all_walkin_data_raw() -> pd.DataFrame:
     if not os.path.isdir(WALKIN_DATA_DIR):
         return pd.DataFrame()
     cached = _load_cached_combined(WALKIN_DATA_DIR, "walkin_combined", required_cols=["Sumber"], schema_version=WALKIN_SCHEMA_VERSION)
@@ -1446,6 +1465,8 @@ def aggregate_walkin_monthly_split(df: pd.DataFrame, tanggal_acuan: date) -> pd.
     # Cabang baru (data pertama muncul di tengah bulan): hari dihitung sejak data pertama,
     # konsisten dengan Excel (MINIFS tanggal mulai).
     first_all = df.groupby("Cabang")["Tanggal"].min()
+    for _cab, _d0 in WALKIN_BRANCH_OPEN.items():
+        first_all[_cab] = _d0
     def _adj(row):
         f = first_all.get(row["Cabang"])
         if f is None or pd.isna(f):
