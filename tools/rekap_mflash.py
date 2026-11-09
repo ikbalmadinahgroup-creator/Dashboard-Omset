@@ -211,7 +211,7 @@ def sheet_paths(z):
         out[html.unescape(m.group(1))]=t
     return out
 
-def read_branches(files):
+def read_branches(files, until=None):
     data=[]; summary=[]
     seen=set()
     for f in sorted(files, key=lambda f: re.search(r'penjualan_(\d{3})',os.path.basename(f)).group(1)):
@@ -239,6 +239,7 @@ def read_branches(files):
                 i=pos.get(cname)
                 o[1+2*k]=r[i] if i is not None and i<len(r) else None
             if not isinstance(o[1],datetime.datetime): sys.exit(f'Tanggal tidak valid di {f}: {o[1]!r}')
+            if until is not None and o[1].date()>until: continue
             out_rows.append(o)
         data.extend(out_rows)
         ds=[r[1] for r in out_rows]
@@ -568,9 +569,10 @@ def patch(src,out,vals,data):
 
 if __name__=='__main__':
     ap=argparse.ArgumentParser(); ap.add_argument('--dashboard',required=True); ap.add_argument('--out',required=True)
-    ap.add_argument('--workdir',required=True); ap.add_argument('branches',nargs='+'); a=ap.parse_args()
+    ap.add_argument('--workdir',required=True); ap.add_argument('--until',help='YYYY-MM-DD: abaikan faktur setelah tanggal ini')
+    ap.add_argument('branches',nargs='+'); a=ap.parse_args()
     os.makedirs(a.workdir,exist_ok=True)
-    data,summary,missing=read_branches(a.branches)
+    data,summary,missing=read_branches(a.branches, datetime.date.fromisoformat(a.until) if a.until else None)
     print('Cabang:'); [print(f'  {c} {n:13s} {k:6d} baris  {d1}..{d2}  Rp {t:,.0f}') for c,n,k,d1,d2,t in summary]
     if missing: print('PERINGATAN: file cabang tidak ada untuk', sorted(CABANG[m] for m in missing))
     print('Total baris', len(data))
