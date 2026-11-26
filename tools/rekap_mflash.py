@@ -211,8 +211,23 @@ def sheet_paths(z):
         out[html.unescape(m.group(1))]=t
     return out
 
+SALES_OVERRIDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'sales_override.csv')
+
+def load_sales_override():
+    # Koreksi nama sales per faktur (kode cabang + NO FAKTUR -> nama sales).
+    # Dipakai karena kolom sales di export Accurate = sales default PELANGGAN,
+    # sehingga ganti sales pelanggan ikut mengubah faktur lama.
+    import csv
+    m={}
+    if os.path.exists(SALES_OVERRIDE):
+        with open(SALES_OVERRIDE, newline='', encoding='utf-8') as fh:
+            for r in csv.DictReader(fh):
+                m[(r['kode_cabang'].zfill(3), r['no_faktur'].strip())]=r['sales'].strip()
+    return m
+
 def read_branches(files, until=None):
     data=[]; summary=[]
+    ovr=load_sales_override(); n_ovr=0
     seen=set()
     for f in sorted(files, key=lambda f: re.search(r'penjualan_(\d{3})',os.path.basename(f)).group(1)):
         code=re.search(r'penjualan_(\d{3})',os.path.basename(f)).group(1)
@@ -240,10 +255,13 @@ def read_branches(files, until=None):
                 o[1+2*k]=r[i] if i is not None and i<len(r) else None
             if not isinstance(o[1],datetime.datetime): sys.exit(f'Tanggal tidak valid di {f}: {o[1]!r}')
             if until is not None and o[1].date()>until: continue
+            key=(code, str(o[3]).strip())
+            if key in ovr and o[41]!=ovr[key]: o[41]=ovr[key]; n_ovr+=1
             out_rows.append(o)
         data.extend(out_rows)
         ds=[r[1] for r in out_rows]
         summary.append((code,CABANG[code],len(out_rows),min(ds).date(),max(ds).date(),sum((r[39] or 0) for r in out_rows)))
+    if n_ovr: print(f'  koreksi sales (sales_override.csv): {n_ovr} baris')
     missing=set(CABANG)-seen
     return data,summary,missing
 
